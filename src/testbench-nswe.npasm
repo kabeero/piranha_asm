@@ -1,0 +1,55 @@
+;-------------------------------------------------------------------------------
+; testbench-nswe.npasm
+;-------------------------------------------------------------------------------
+
+START:
+
+    LDR     r0, rcr     ; Prepare to exchange rcr values
+    LDR     r1, rcr
+    LDR     r2, rcr
+    LDR     r3, rcr
+
+    LDR     r0, n       ; Read the value from the north NP
+    LDR     r1, s       ; Read the value from the south NP
+    LDR     r2, w       ; Read the value from the west NP
+    LDR     r3, e       ; Read the value from the east NP
+                   
+    OUT     r0, 0
+    OUT     r0, 1
+    OUT     r0, 2
+    OUT     r0, 3
+    OUT     r0, 4
+    OUT     r0, 5
+    OUT     r0, 6
+    OUT     r0, 7
+                 
+    OUT     r1, 0
+    OUT     r1, 1
+    OUT     r1, 2
+    OUT     r1, 3
+    OUT     r1, 4
+    OUT     r1, 5
+    OUT     r1, 6
+    OUT     r1, 7
+                 
+    OUT     r2, 0
+    OUT     r2, 1
+    OUT     r2, 2
+    OUT     r2, 3
+    OUT     r2, 4
+    OUT     r2, 5
+    OUT     r2, 6
+    OUT     r2, 7
+                 
+    OUT     r3, 0
+    OUT     r3, 1
+    OUT     r3, 2
+    OUT     r3, 3
+    OUT     r3, 4
+    OUT     r3, 5
+    OUT     r3, 6
+    OUT     r3, 7
+
+END:
+
+    RST

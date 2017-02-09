@@ -1,0 +1,614 @@
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | ; histogram.npasm
+  0 000h |                         | ;
+  0 000h |                         | ; Computes the histogram for a full image.  This process is distributed across 
+  0 000h |                         | ; individual NPs and then their results are summed along the rows and columns
+  0 000h |                         | ; to form the final histogram.  In the end, NPs in row 0 contain the column
+  0 000h |                         | ; histogram bins in z[0..7] and NPs in column 0 contain the row histogram bins 
+  0 000h |                         | ; in z[8..15].
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | 
+  0 000h |                         | ; Define new instruction labels to make the code intuitive to read.
+  0 000h |                         | 
+  0 000h |                         | #define PXL_ROW_MASK        00111000b   ; The row bits for pixels
+  0 000h |                         | #define PXL_COL_MASK        00000111b   ; The column bits for pixels
+  0 000h |                         | 
+  0 000h |                         | #define NP_ROW_MASK         11110000b   ; The row bits for NPs in RCR
+  0 000h |                         | #define NP_COL_MASK         00001111b   ; The column bits for NPs in RCR
+  0 000h |                         | 
+  0 000h |                         | #define PXL_EDGE_N          00000000b   ; Matches pixels on N edge of NP
+  0 000h |                         | #define PXL_EDGE_S          00111000b   ; Matches pixels on S edge of NP
+  0 000h |                         | #define PXL_EDGE_W          00000000b   ; Matches pixels on W edge of NP
+  0 000h |                         | #define PXL_EDGE_E          00000111b   ; Matches pixels on E edge of NP
+  0 000h |                         |  
+  0 000h |                         | #define START_OF_X          00000000b   ; Starting address of X RAM.
+  0 000h |                         | #define START_OF_Y          01000000b   ; Starting address of Y RAM.
+  0 000h |                         | #define START_OF_Z          10000000b   ; Starting address of X RAM.
+  0 000h |                         | #define START_OF_V          11000000b   ; Starting address of V RAM.
+  0 000h |                         |  
+  0 000h |                         | #define TRUE                 1  ; True pattern
+  0 000h |                         | #define FALSE                0  ; False pattern
+  0 000h |                         | #define NULL                -1  ; Null pattern
+  0 000h |                         | 
+  0 000h |                         | #define NUM_PIXELS  64          ; The number of pixels in the NP.
+  0 000h |                         | #define MASK_AF     01000000b   ; Mask for ADC active flag
+  0 000h |                         | 
+  0 000h |                         | ; Algorithm constants.
+  0 000h |                         | 
+  0 000h |                         | #define HIST_BIN_MASK       00111111b   ; Isolates bin portion of hist address
+  0 000h |                         | #define HIST_NP_MASK        11000000b   ; Isolates NP portion of hist address
+  0 000h |                         | #define HIST_NP_00          00000000b   ; Matches NW NP, bins 0..63
+  0 000h |                         | #define HIST_NP_01          01000000b   ; Matches NE NP, bins 64..127
+  0 000h |                         | #define HIST_NP_10          10000000b   ; Matches SW NP, bins 128..191
+  0 000h |                         | #define HIST_NP_11          11000000b   ; Matches SE NP, bins 192..255
+  0 000h |                         | 
+  0 000h |                         | ; Algorithm variables.
+  0 000h |                         | 
+  0 000h |                         | #define intensity           v0          ; The current pixel intensity being binned
+  0 000h |                         | #define hist_assignment     v1          ; Allows each NP to know its bin range
+  0 000h |                         | #define index               v2          ; The current pixel index being binned
+  0 000h |                         | #define index_y             v3          ; index, but with y offset
+  0 000h |                         | #define index_z             v4          ; index, but with z offset
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | 
+  0 000h |                         |  
+  0 000h |                         | START:
+  0 000h |                         |  
+  0 000h |                         | ; Zero all of Y and Z memory where the histograms are stored.
+  0 000h |                         |          
+  0 000h |                         | CLEAR_HIST:
+  0 000h |                         | 
+  0 000h |                         | CLEAR_HIST_INIT:
+  0 000h |                         | 
+  0 000h | 4140h 0100000101000000b |     LDR     r0, START_OF_Y
+  1 001h | 4300h 0100001100000000b |     LDR     r1, 0
+  2 002h |                         | 
+  2 002h |                         | CLEAR_HIST_LOOP:
+  2 002h |                         | 
+  2 002h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+  3 003h | 0101h 0000000100000001b |     ADD     r0, 1
+  4 004h | 39C0h 0011100111000000b |     CMP     r0, {START_OF_Y + 2*NUM_PIXELS}
+  5 005h | C023h 1100000000100011b |     BLO     CLEAR_HIST_LOOP
+  6 006h |                         | 
+  6 006h |                         | ACQUIRE_IMAGE_RESET:
+  6 006h |                         | 
+  6 006h | 8220h 1000001000100000b |     IMG                     ; Acquire a new image from the ADCs with 0 t_int
+  7 007h |                         | 
+  7 007h |                         | WAIT_FOR_ADC_RESET:
+  7 007h |                         | 
+  7 007h | 40F4h 0100000011110100b |     LDR     r0, SR             ; Load the status register
+  8 008h | 2140h 0010000101000000b |     AND     r0, MASK_AF        ; Check if the ADC is active
+  9 009h | C071h 1100000001110001b |     BNZ     WAIT_FOR_ADC_RESET ; Loop while the ADC is converting
+ 10 00Ah |                         | 
+ 10 00Ah |                         | MOVE_TO_Z_INIT:
+ 10 00Ah |                         | 	
+ 10 00Ah | 4300h 0100001100000000b |     LDR     r1, START_OF_X
+ 11 00Bh | 4580h 0100010110000000b |     LDR     r2, START_OF_Z
+ 12 00Ch |                         | 
+ 12 00Ch |                         | MOVE_TO_Z:
+ 12 00Ch |                         | 
+ 12 00Ch | 40F1h 0100000011110001b |     LDR     r0, [r1]
+ 13 00Dh | 8820h 1000100000100000b |     GTB     r0
+ 14 00Eh | 48F2h 0100100011110010b |     STR     r0, [r2]
+ 15 00Fh | 0301h 0000001100000001b |     ADD     r1, 1
+ 16 010h | 0501h 0000010100000001b |     ADD     r2, 1
+ 17 011h | 3B40h 0011101101000000b |     CMP     r1, NUM_PIXELS
+ 18 012h | C0C1h 1100000011000001b |     BNE     MOVE_TO_Z
+ 19 013h |                         |      
+ 19 013h |                         | ACQUIRE_IMAGE:
+ 19 013h |                         | 
+ 19 013h | 8220h 1000001000100000b |     IMG                     ; Acquire a new image from the ADCs with real t_int
+ 20 014h |                         | 
+ 20 014h |                         | WAIT_FOR_ADC:
+ 20 014h |                         | 
+ 20 014h | 40F4h 0100000011110100b |     LDR     r0, SR          ; Load the status register
+ 21 015h | 2140h 0010000101000000b |     AND     r0, MASK_AF     ; Check if the ADC is active
+ 22 016h | C141h 1100000101000001b |     BNZ     WAIT_FOR_ADC    ; Loop while the ADC is converting
+ 23 017h |                         | 
+ 23 017h |                         | DIFFERENCE_INIT:
+ 23 017h |                         |     
+ 23 017h | 4300h 0100001100000000b |     LDR     r1, START_OF_X
+ 24 018h | 4580h 0100010110000000b |     LDR     r2, START_OF_Z
+ 25 019h |                         | 
+ 25 019h |                         | DIFFERENCE:
+ 25 019h |                         | 
+ 25 019h | 40F1h 0100000011110001b |     LDR     r0, [r1]
+ 26 01Ah | 8820h 1000100000100000b |     GTB     r0
+ 27 01Bh | 010Eh 0000000100001110b |     ADD     r0, 14
+ 28 01Ch | 10F2h 0001000011110010b |     SUB     r0, [r2]
+ 29 01Dh | 48F1h 0100100011110001b |     STR     r0, [r1]
+ 30 01Eh | 0301h 0000001100000001b |     ADD     r1, 1
+ 31 01Fh | 0501h 0000010100000001b |     ADD     r2, 1
+ 32 020h | 3B40h 0011101101000000b |     CMP     r1, NUM_PIXELS
+ 33 021h | C191h 1100000110010001b |     BNE     DIFFERENCE 
+ 34 022h |                         | 
+ 34 022h |                         | OUTPUT_ORIGINAL_IMAGE:
+ 34 022h |                         | 
+ 34 022h | 4100h 0100000100000000b |     LDR     r0, START_OF_X
+ 35 023h | F160h 1111000101100000b |     BL      Output_Data_Block   ; Output the image
+ 36 024h |                         |         
+ 36 024h |                         | ;-------------------------------------------------------------------------------
+ 36 024h |                         | 
+ 36 024h |                         | ; NPs are grouped in 2x2 clusters.  The histogram will have 256 bins 
+ 36 024h |                         | ; corresponding to intensities from 0 to 255.  Due to the number of pixels, 16
+ 36 024h |                         | ; bit numbers are used to store bin counts.  The LSByte is stored in Y memory 
+ 36 024h |                         | ; and the MSByte is stored in Z memory.  Each NP in the 2x2 cluster is 
+ 36 024h |                         | ; responsible for storing 64 16-bit bins.  The ranges 0..63, 64..127, 128..191,
+ 36 024h |                         | ; and 192..255 are stored in the NW, NE, SW, and SE NPs, respectively.  Each
+ 36 024h |                         | ; iteration a new pixel is read and then cycled around the circle of 4 NPs.  
+ 36 024h |                         | ; Each NP checks if the value is within its histogram range and, if so, updates
+ 36 024h |                         | ; its bin counts.  Once all of the pixels are scanned, NP clusters shift and
+ 36 024h |                         | ; combine their data into the cluster neareset the origin, in NP(0,0), NP (0,1),
+ 36 024h |                         | ; NP(1,0), and NP(1,1).
+ 36 024h |                         | 
+ 36 024h |                         | CLUSTER_HISTOGRAM:
+ 36 024h |                         | 
+ 36 024h |                         | CH_INIT:
+ 36 024h |                         | 
+ 36 024h |                         |     ; Assign each NP a range of histogram bins.  This is done using masks. 
+ 36 024h |                         |     ; Assignment is based on even/odd rows/columns.
+ 36 024h |                         | 
+ 36 024h |                         |     ; Even columns
+ 36 024h |                         | 
+ 36 024h | 40F8h 0100000011111000b |     LDR     r0, RCR         
+ 37 025h | 2101h 0010000100000001b |     AND     r0, 01h                 ; Check if LSb of column is even or odd
+ 38 026h | 9001h 1001000000000001b |     ZNE                             ; Only even columns remain
+ 39 027h | 40F8h 0100000011111000b |         LDR     r0, RCR
+ 40 028h | 2110h 0010000100010000b |         AND     r0, 10h             ; Check if LSb of row is even or odd
+ 41 029h | 9001h 1001000000000001b |         ZNE                         ; Only even rows and columns remain
+ 42 02Ah | 4100h 0100000100000000b |             LDR     r0, HIST_NP_00
+ 43 02Bh | 48C1h 0100100011000001b |             STR     r0, hist_assignment
+ 44 02Ch | 8240h 1000001001000000b |         WAK
+ 45 02Dh | 9000h 1001000000000000b |         ZEQ                         ; odd rows, even columns
+ 46 02Eh | 4180h 0100000110000000b |             LDR     r0, HIST_NP_10
+ 47 02Fh | 48C1h 0100100011000001b |             STR     r0, hist_assignment
+ 48 030h | 8240h 1000001001000000b |         WAK
+ 49 031h | 8240h 1000001001000000b |     WAK
+ 50 032h |                         | 
+ 50 032h |                         |     ; Odd columns
+ 50 032h |                         |        
+ 50 032h | 40F8h 0100000011111000b |     LDR     r0, RCR         
+ 51 033h | 2101h 0010000100000001b |     AND     r0, 01h                 ; Check if LSb of column is even or odd
+ 52 034h | 9000h 1001000000000000b |     ZEQ                             ; Only odd columns remain
+ 53 035h | 40F8h 0100000011111000b |         LDR     r0, RCR
+ 54 036h | 2110h 0010000100010000b |         AND     r0, 10h             ; Check if LSb of row is even or odd
+ 55 037h | 9001h 1001000000000001b |         ZNE                         ; Only even rows and odd columns remain
+ 56 038h | 4140h 0100000101000000b |             LDR     r0, HIST_NP_01
+ 57 039h | 48C1h 0100100011000001b |             STR     r0, hist_assignment
+ 58 03Ah | 8240h 1000001001000000b |         WAK
+ 59 03Bh | 9000h 1001000000000000b |         ZEQ                         ; odd rows, odd columns
+ 60 03Ch | 41C0h 0100000111000000b |             LDR     r0, HIST_NP_11
+ 61 03Dh | 48C1h 0100100011000001b |             STR     r0, hist_assignment
+ 62 03Eh | 8240h 1000001001000000b |         WAK
+ 63 03Fh | 8240h 1000001001000000b |     WAK
+ 64 040h |                         | 
+ 64 040h |                         |     ; Initialize loop variables
+ 64 040h |                         |        
+ 64 040h | 4100h 0100000100000000b |     LDR     r0, 0               ; Start with the NW pixel
+ 65 041h | 48C2h 0100100011000010b |     STR     r0, index
+ 66 042h |                         | 
+ 66 042h |                         | CH_LOOP:
+ 66 042h |                         | 
+ 66 042h | 42F0h 0100001011110000b |     LDR     r1, [r0]            ; Read the pixel
+ 67 043h | 4AC0h 0100101011000000b |     STR     r1, intensity       ; Save pixel intensity
+ 68 044h | F050h 1111000001010000b |     BL      Bin_Matching_Pixels
+ 69 045h | EF80h 1110111110000000b |     BL      Swap_Pixels_Horizontally
+ 70 046h | F050h 1111000001010000b |     BL      Bin_Matching_Pixels
+ 71 047h | EEB0h 1110111010110000b |     BL      Swap_Pixels_Vertically
+ 72 048h | F050h 1111000001010000b |     BL      Bin_Matching_Pixels
+ 73 049h | EF80h 1110111110000000b |     BL      Swap_Pixels_Horizontally
+ 74 04Ah | F050h 1111000001010000b |     BL      Bin_Matching_Pixels
+ 75 04Bh | 40C2h 0100000011000010b |     LDR     r0, index
+ 76 04Ch | 0101h 0000000100000001b |     ADD     r0, 1
+ 77 04Dh | 48C2h 0100100011000010b |     STR     r0, index
+ 78 04Eh | 3940h 0011100101000000b |     CMP     r0, NUM_PIXELS
+ 79 04Fh | C423h 1100010000100011b |     BLO     CH_LOOP
+ 80 050h |                         | 
+ 80 050h |                         | ;-------------------------------------------------------------------------------
+ 80 050h |                         |     
+ 80 050h |                         | ; At this point each 2x2 NP cluster has formed its own histogram.  All 256 bins,
+ 80 050h |                         | ; each 16 bit, need to be shifted across the array of NPs into one central 
+ 80 050h |                         | ; histogram, which is located in the 2x2 NP group nearest the origin.  In order
+ 80 050h |                         | ; to speed up this process, bins are first combined column-wise in two steps and 
+ 80 050h |                         | ; then row-wise in three steps.  The final column of NP clusters will be reading
+ 80 050h |                         | ; garbage data during this time since they have no addition NPs to their E, but
+ 80 050h |                         | ; this does not introduce errors since they will only read and add zeros to 
+ 80 050h |                         | ; their bin counts.
+ 80 050h |                         | 
+ 80 050h |                         | GLOBAL_HISTOGRAM:
+ 80 050h |                         | 
+ 80 050h |                         | ; First combine adjacent rows of clusters.
+ 80 050h |                         | 
+ 80 050h |                         | GH_ADD_ROWS_X1:
+ 80 050h |                         | 
+ 80 050h | 4140h 0100000101000000b |     LDR     r0, START_OF_Y
+ 81 051h | 48C3h 0100100011000011b |     STR     r0, index_y
+ 82 052h | 4180h 0100000110000000b |     LDR     r0, START_OF_Z
+ 83 053h | 48C4h 0100100011000100b |     STR     r0, index_z
+ 84 054h |                         | 
+ 84 054h |                         | GH_ADD_ROWS_X1_LOOP:
+ 84 054h |                         |             
+ 84 054h | 40C3h 0100000011000011b |     LDR     r0, index_y
+ 85 055h | 42C4h 0100001011000100b |     LDR     r1, index_z
+ 86 056h | 44F0h 0100010011110000b |     LDR     r2, [r0]
+ 87 057h | 46F1h 0100011011110001b |     LDR     r3, [r1]
+ 88 058h |                         | 
+ 88 058h | 44E2h 0100010011100010b |     LDR     r2, S               ; Read the external NP's bin values
+ 89 059h | 44E2h 0100010011100010b |     LDR     r2, S
+ 90 05Ah | 46E2h 0100011011100010b |     LDR     r3, S
+ 91 05Bh | 46E2h 0100011011100010b |     LDR     r3, S
+ 92 05Ch |                         | 
+ 92 05Ch | 40F0h 0100000011110000b |     LDR     r0, [r0]            ; Load this NP's bin values
+ 93 05Dh | 42F1h 0100001011110001b |     LDR     r1, [r1]
+ 94 05Eh |                         | 
+ 94 05Eh | 00D2h 0000000011010010b |     ADD     r0, r2              ; Perform 16 bit addition
+ 95 05Fh | 0AD3h 0000101011010011b |     ADC     r1, r3      
+ 96 060h |                         | 
+ 96 060h | 44C3h 0100010011000011b |     LDR     r2, index_y         ; Save new bin value
+ 97 061h | 46C4h 0100011011000100b |     LDR     r3, index_z
+ 98 062h | 48F2h 0100100011110010b |     STR     r0, [r2]
+ 99 063h | 4AF3h 0100101011110011b |     STR     r1, [r3]
+100 064h |                         | 
+100 064h | 0501h 0000010100000001b |     ADD     r2, 1               ; Update bin indices
+101 065h | 0701h 0000011100000001b |     ADD     r3, 1
+102 066h | 4CC3h 0100110011000011b |     STR     r2, index_y
+103 067h | 4EC4h 0100111011000100b |     STR     r3, index_z
+104 068h | 3D80h 0011110110000000b |     CMP     r2, {START_OF_Y + NUM_PIXELS}   ; Are all pixels covered?
+105 069h | C543h 1100010101000011b |     BLO     GH_ADD_ROWS_X1_LOOP
+106 06Ah |                         | 
+106 06Ah |                         | ; Now combine bins across a span of two rows.
+106 06Ah |                         | 
+106 06Ah |                         | GH_ADD_ROWS_X2:
+106 06Ah |                         |  
+106 06Ah | 4140h 0100000101000000b |     LDR     r0, START_OF_Y
+107 06Bh | 48C3h 0100100011000011b |     STR     r0, index_y
+108 06Ch | 4180h 0100000110000000b |     LDR     r0, START_OF_Z
+109 06Dh | 48C4h 0100100011000100b |     STR     r0, index_z
+110 06Eh |                         | 
+110 06Eh |                         | GH_ADD_ROWS_X2_LOOP:
+110 06Eh |                         | 
+110 06Eh | 40C3h 0100000011000011b |     LDR     r0, index_y
+111 06Fh | 42C4h 0100001011000100b |     LDR     r1, index_z
+112 070h | 44F0h 0100010011110000b |     LDR     r2, [r0]
+113 071h | 46F1h 0100011011110001b |     LDR     r3, [r1]
+114 072h |                         | 
+114 072h | 44E2h 0100010011100010b |     LDR     r2, S               ; Read the external NP's bin values
+115 073h | 44E2h 0100010011100010b |     LDR     r2, S               ; x4 now, to jump two 2x2 clusters
+116 074h | 44E2h 0100010011100010b |     LDR     r2, S
+117 075h | 44E2h 0100010011100010b |     LDR     r2, S
+118 076h | 46E2h 0100011011100010b |     LDR     r3, S
+119 077h | 46E2h 0100011011100010b |     LDR     r3, S
+120 078h | 46E2h 0100011011100010b |     LDR     r3, S
+121 079h | 46E2h 0100011011100010b |     LDR     r3, S
+122 07Ah |                         | 
+122 07Ah | 40F0h 0100000011110000b |     LDR     r0, [r0]            ; Load this NP's bin values
+123 07Bh | 42F1h 0100001011110001b |     LDR     r1, [r1]
+124 07Ch |                         | 
+124 07Ch | 00D2h 0000000011010010b |     ADD     r0, r2              ; Perform 16 bit addition
+125 07Dh | 0AD3h 0000101011010011b |     ADC     r1, r3      
+126 07Eh |                         | 
+126 07Eh | 44C3h 0100010011000011b |     LDR     r2, index_y         ; Save new bin value
+127 07Fh | 46C4h 0100011011000100b |     LDR     r3, index_z
+128 080h | 48F2h 0100100011110010b |     STR     r0, [r2]
+129 081h | 4AF3h 0100101011110011b |     STR     r1, [r3]
+130 082h |                         | 
+130 082h | 0501h 0000010100000001b |     ADD     r2, 1                           ; Update bin indices
+131 083h | 0701h 0000011100000001b |     ADD     r3, 1
+132 084h | 4CC3h 0100110011000011b |     STR     r2, index_y
+133 085h | 4EC4h 0100111011000100b |     STR     r3, index_z
+134 086h | 3D80h 0011110110000000b |     CMP     r2, {START_OF_Y + NUM_PIXELS}   ; Are all pixels covered?
+135 087h | C6E3h 1100011011100011b |     BLO     GH_ADD_ROWS_X2_LOOP
+136 088h |                         |   
+136 088h |                         | ; Combine bins across a span of one column.
+136 088h |                         | 
+136 088h |                         | GH_ADD_COLS_X1:
+136 088h |                         |  
+136 088h | 4140h 0100000101000000b |     LDR     r0, START_OF_Y
+137 089h | 48C3h 0100100011000011b |     STR     r0, index_y
+138 08Ah | 4180h 0100000110000000b |     LDR     r0, START_OF_Z
+139 08Bh | 48C4h 0100100011000100b |     STR     r0, index_z
+140 08Ch |                         | 
+140 08Ch |                         | GH_ADD_COLS_X1_LOOP:
+140 08Ch |                         | 
+140 08Ch | 40C3h 0100000011000011b |     LDR     r0, index_y
+141 08Dh | 42C4h 0100001011000100b |     LDR     r1, index_z
+142 08Eh | 44F0h 0100010011110000b |     LDR     r2, [r0]
+143 08Fh | 46F1h 0100011011110001b |     LDR     r3, [r1]
+144 090h |                         | 
+144 090h | 44E8h 0100010011101000b |     LDR     r2, E               ; Read the external NP's bin values
+145 091h | 44E8h 0100010011101000b |     LDR     r2, E
+146 092h | 46E8h 0100011011101000b |     LDR     r3, E
+147 093h | 46E8h 0100011011101000b |     LDR     r3, E
+148 094h |                         | 
+148 094h | 40F0h 0100000011110000b |     LDR     r0, [r0]            ; Load this NP's bin values
+149 095h | 42F1h 0100001011110001b |     LDR     r1, [r1]
+150 096h |                         | 
+150 096h | 00D2h 0000000011010010b |     ADD     r0, r2              ; Perform 16 bit addition
+151 097h | 0AD3h 0000101011010011b |     ADC     r1, r3      
+152 098h |                         | 
+152 098h | 44C3h 0100010011000011b |     LDR     r2, index_y         ; Save new bin value
+153 099h | 46C4h 0100011011000100b |     LDR     r3, index_z
+154 09Ah | 48F2h 0100100011110010b |     STR     r0, [r2]
+155 09Bh | 4AF3h 0100101011110011b |     STR     r1, [r3]
+156 09Ch |                         | 
+156 09Ch | 0501h 0000010100000001b |     ADD     r2, 1                           ; Update bin indices
+157 09Dh | 0701h 0000011100000001b |     ADD     r3, 1
+158 09Eh | 4CC3h 0100110011000011b |     STR     r2, index_y
+159 09Fh | 4EC4h 0100111011000100b |     STR     r3, index_z
+160 0A0h | 3D80h 0011110110000000b |     CMP     r2, {START_OF_Y + NUM_PIXELS}   ; Are all pixels covered?
+161 0A1h | C8C3h 1100100011000011b |     BLO     GH_ADD_COLS_X1_LOOP
+162 0A2h |                         |                                    
+162 0A2h |                         | ; Combine bins across a span of two columns.
+162 0A2h |                         | 
+162 0A2h |                         | GH_ADD_COLS_X2:
+162 0A2h |                         |  
+162 0A2h | 4140h 0100000101000000b |     LDR     r0, START_OF_Y
+163 0A3h | 48C3h 0100100011000011b |     STR     r0, index_y
+164 0A4h | 4180h 0100000110000000b |     LDR     r0, START_OF_Z
+165 0A5h | 48C4h 0100100011000100b |     STR     r0, index_z
+166 0A6h |                         | 
+166 0A6h |                         | GH_ADD_COLS_X2_LOOP:
+166 0A6h |                         | 
+166 0A6h | 40C3h 0100000011000011b |     LDR     r0, index_y
+167 0A7h | 42C4h 0100001011000100b |     LDR     r1, index_z
+168 0A8h | 44F0h 0100010011110000b |     LDR     r2, [r0]
+169 0A9h | 46F1h 0100011011110001b |     LDR     r3, [r1]
+170 0AAh |                         | 
+170 0AAh | 44E8h 0100010011101000b |     LDR     r2, E               ; Read the external NP's bin values
+171 0ABh | 44E8h 0100010011101000b |     LDR     r2, E               ; x4 for two columns of 2x2 clusters
+172 0ACh | 44E8h 0100010011101000b |     LDR     r2, E
+173 0ADh | 44E8h 0100010011101000b |     LDR     r2, E
+174 0AEh | 46E8h 0100011011101000b |     LDR     r3, E
+175 0AFh | 46E8h 0100011011101000b |     LDR     r3, E
+176 0B0h | 46E8h 0100011011101000b |     LDR     r3, E
+177 0B1h | 46E8h 0100011011101000b |     LDR     r3, E
+178 0B2h |                         | 
+178 0B2h | 40F0h 0100000011110000b |     LDR     r0, [r0]            ; Load this NP's bin values
+179 0B3h | 42F1h 0100001011110001b |     LDR     r1, [r1]
+180 0B4h |                         | 
+180 0B4h | 00D2h 0000000011010010b |     ADD     r0, r2              ; Perform 16 bit addition
+181 0B5h | 0AD3h 0000101011010011b |     ADC     r1, r3      
+182 0B6h |                         | 
+182 0B6h | 44C3h 0100010011000011b |     LDR     r2, index_y         ; Save new bin value
+183 0B7h | 46C4h 0100011011000100b |     LDR     r3, index_z
+184 0B8h | 48F2h 0100100011110010b |     STR     r0, [r2]
+185 0B9h | 4AF3h 0100101011110011b |     STR     r1, [r3]
+186 0BAh |                         | 
+186 0BAh | 0501h 0000010100000001b |     ADD     r2, 1                           ; Update bin indices
+187 0BBh | 0701h 0000011100000001b |     ADD     r3, 1
+188 0BCh | 4CC3h 0100110011000011b |     STR     r2, index_y
+189 0BDh | 4EC4h 0100111011000100b |     STR     r3, index_z
+190 0BEh | 3D80h 0011110110000000b |     CMP     r2, {START_OF_Y + NUM_PIXELS}   ; Are all pixels covered?
+191 0BFh | CA63h 1100101001100011b |     BLO     GH_ADD_COLS_X2_LOOP
+192 0C0h |                         |  
+192 0C0h |                         |  
+192 0C0h |                         | ; Combine bins across a span of four columns.
+192 0C0h |                         | 
+192 0C0h |                         | GH_ADD_COLS_X4:
+192 0C0h |                         |  
+192 0C0h | 4140h 0100000101000000b |     LDR     r0, START_OF_Y
+193 0C1h | 48C3h 0100100011000011b |     STR     r0, index_y
+194 0C2h | 4180h 0100000110000000b |     LDR     r0, START_OF_Z
+195 0C3h | 48C4h 0100100011000100b |     STR     r0, index_z
+196 0C4h |                         | 
+196 0C4h |                         | GH_ADD_COLS_X4_LOOP:
+196 0C4h |                         | 
+196 0C4h | 40C3h 0100000011000011b |     LDR     r0, index_y
+197 0C5h | 42C4h 0100001011000100b |     LDR     r1, index_z
+198 0C6h | 44F0h 0100010011110000b |     LDR     r2, [r0]
+199 0C7h | 46F1h 0100011011110001b |     LDR     r3, [r1]
+200 0C8h |                         | 
+200 0C8h | 44E8h 0100010011101000b |     LDR     r2, E               ; Read the external NP's bin values
+201 0C9h | 44E8h 0100010011101000b |     LDR     r2, E               ; x8 for 4 2x2 cluster columns
+202 0CAh | 44E8h 0100010011101000b |     LDR     r2, E
+203 0CBh | 44E8h 0100010011101000b |     LDR     r2, E
+204 0CCh | 44E8h 0100010011101000b |     LDR     r2, E
+205 0CDh | 44E8h 0100010011101000b |     LDR     r2, E
+206 0CEh | 44E8h 0100010011101000b |     LDR     r2, E
+207 0CFh | 44E8h 0100010011101000b |     LDR     r2, E
+208 0D0h | 46E8h 0100011011101000b |     LDR     r3, E
+209 0D1h | 46E8h 0100011011101000b |     LDR     r3, E
+210 0D2h | 46E8h 0100011011101000b |     LDR     r3, E
+211 0D3h | 46E8h 0100011011101000b |     LDR     r3, E
+212 0D4h | 46E8h 0100011011101000b |     LDR     r3, E
+213 0D5h | 46E8h 0100011011101000b |     LDR     r3, E
+214 0D6h | 46E8h 0100011011101000b |     LDR     r3, E
+215 0D7h | 46E8h 0100011011101000b |     LDR     r3, E
+216 0D8h |                         | 
+216 0D8h | 40F0h 0100000011110000b |     LDR     r0, [r0]            ; Load this NP's bin values
+217 0D9h | 42F1h 0100001011110001b |     LDR     r1, [r1]
+218 0DAh |                         | 
+218 0DAh | 00D2h 0000000011010010b |     ADD     r0, r2              ; Perform 16 bit addition
+219 0DBh | 0AD3h 0000101011010011b |     ADC     r1, r3      
+220 0DCh |                         | 
+220 0DCh | 44C3h 0100010011000011b |     LDR     r2, index_y         ; Save new bin value
+221 0DDh | 46C4h 0100011011000100b |     LDR     r3, index_z
+222 0DEh | 48F2h 0100100011110010b |     STR     r0, [r2]
+223 0DFh | 4AF3h 0100101011110011b |     STR     r1, [r3]
+224 0E0h |                         | 
+224 0E0h | 0501h 0000010100000001b |     ADD     r2, 1                           ; Update bin indices
+225 0E1h | 0701h 0000011100000001b |     ADD     r3, 1
+226 0E2h | 4CC3h 0100110011000011b |     STR     r2, index_y
+227 0E3h | 4EC4h 0100111011000100b |     STR     r3, index_z
+228 0E4h | 3D80h 0011110110000000b |     CMP     r2, {START_OF_Y + NUM_PIXELS}   ; Are all pixels covered?
+229 0E5h | CC43h 1100110001000011b |     BLO     GH_ADD_COLS_X4_LOOP
+230 0E6h |                         |  
+230 0E6h |                         | ;-------------------------------------------------------------------------------
+230 0E6h |                         |        
+230 0E6h |                         | DEBUG:
+230 0E6h |                         | 
+230 0E6h | 4140h 0100000101000000b |     LDR     r0, START_OF_Y
+231 0E7h | F160h 1111000101100000b |     BL      Output_Data_Block
+232 0E8h | 4180h 0100000110000000b |     LDR     r0, START_OF_Z
+233 0E9h | F160h 1111000101100000b |     BL      Output_Data_Block
+234 0EAh |                         | 
+234 0EAh |                         | ;-------------------------------------------------------------------------------
+234 0EAh |                         | 
+234 0EAh | C00Fh 1100000000001111b |     B       START
+235 0EBh |                         |  
+235 0EBh |                         | 
+235 0EBh |                         | 
+235 0EBh |                         | ;-------------------------------------------------------------------------------
+235 0EBh |                         | ; Swaps pixel values vertically within a 2x2 NP cluster.
+235 0EBh |                         | ;
+235 0EBh |                         | ;   NP00   NP01
+235 0EBh |                         | ;    |      |
+235 0EBh |                         | ;    |      |
+235 0EBh |                         | ;   NP10   NP11
+235 0EBh |                         | ;
+235 0EBh |                         | ; Inputs:
+235 0EBh |                         | ;
+235 0EBh |                         | ;   intensity   Pixel value to be swapped, probably stored in v memory
+235 0EBh |                         | ;
+235 0EBh |                         | ; Outputs:
+235 0EBh |                         | ;
+235 0EBh |                         | ;   intensity   Pixel value from NP to the N/S depending on this NP's position 
+235 0EBh |                         | ;               in the 2x2 cluster.
+235 0EBh |                         | ;
+235 0EBh |                         | ; Registers Modified:
+235 0EBh |                         | ;
+235 0EBh |                         | ;   r0, r1
+235 0EBh |                         | ;-------------------------------------------------------------------------------
+235 0EBh |                         | 
+235 0EBh |                         | Swap_Pixels_Vertically:
+235 0EBh |                         | 
+235 0EBh | 40C0h 0100000011000000b |     LDR     r0, intensity       ; Load this NPs current intensity
+236 0ECh | 42F8h 0100001011111000b |     LDR     r1, RCR             ; Turn off the odd rows
+237 0EDh | 2310h 0010001100010000b |     AND     r1, 10h 
+238 0EEh | 9001h 1001000000000001b |     ZNE
+239 0EFh | 42C0h 0100001011000000b |         LDR     r1, intensity   ; Save copy of intensity for S NP
+240 0F0h | 40E2h 0100000011100010b |         LDR     r0, S           ; Load pixel from S NP
+241 0F1h | 48C0h 0100100011000000b |         STR     r0, intensity
+242 0F2h | 8240h 1000001001000000b |     WAK
+243 0F3h | 9000h 1001000000000000b |     ZEQ                         ; Turn off even rows
+244 0F4h | 42E1h 0100001011100001b |         LDR     r1, N           ; Load pixel from N NP
+245 0F5h | 4AC0h 0100101011000000b |         STR     r1, intensity   ; N NP has our intensity, no tricks req'd
+246 0F6h | 8240h 1000001001000000b |     WAK
+247 0F7h | 8210h 1000001000010000b |     BX
+248 0F8h |                         |     
+248 0F8h |                         | 
+248 0F8h |                         |  
+248 0F8h |                         | ;-------------------------------------------------------------------------------
+248 0F8h |                         | ; Swaps pixel values horizontally within a 2x2 NP cluster.
+248 0F8h |                         | ;
+248 0F8h |                         | ;   NP00---NP01
+248 0F8h |                         | ;
+248 0F8h |                         | ;
+248 0F8h |                         | ;   NP10---NP11
+248 0F8h |                         | ;
+248 0F8h |                         | ; Inputs:
+248 0F8h |                         | ;
+248 0F8h |                         | ;   intensity   Pixel value to be swapped, probably stored in v memory
+248 0F8h |                         | ;
+248 0F8h |                         | ; Outputs:
+248 0F8h |                         | ;
+248 0F8h |                         | ;   intensity   Pixel value from NP to the N/S depending on this NP's position 
+248 0F8h |                         | ;               in the 2x2 cluster.
+248 0F8h |                         | ;
+248 0F8h |                         | ; Registers Modified:
+248 0F8h |                         | ;
+248 0F8h |                         | ;   r0, r1
+248 0F8h |                         | ;-------------------------------------------------------------------------------
+248 0F8h |                         |  
+248 0F8h |                         | Swap_Pixels_Horizontally:
+248 0F8h |                         |       
+248 0F8h | 40C0h 0100000011000000b |     LDR     r0, intensity       ; Load this NPs current intensity
+249 0F9h | 42F8h 0100001011111000b |     LDR     r1, RCR             ; Turn off the odd columns
+250 0FAh | 2301h 0010001100000001b |     AND     r1, 01h 
+251 0FBh | 9001h 1001000000000001b |     ZNE
+252 0FCh | 42C0h 0100001011000000b |         LDR     r1, intensity   ; Save copy of intensity for E NP
+253 0FDh | 40E8h 0100000011101000b |         LDR     r0, E           ; Load pixel from E NP
+254 0FEh | 48C0h 0100100011000000b |         STR     r0, intensity
+255 0FFh | 8240h 1000001001000000b |     WAK
+256 100h | 9000h 1001000000000000b |     ZEQ                         ; Turn off even rows
+257 101h | 42E4h 0100001011100100b |         LDR     r1, W           ; Load pixel from W NP
+258 102h | 4AC0h 0100101011000000b |         STR     r1, intensity   ; W NP has our intensity, no tricks req'd
+259 103h | 8240h 1000001001000000b |     WAK
+260 104h | 8210h 1000001000010000b |     BX
+261 105h |                         | 
+261 105h |                         | 
+261 105h |                         |       
+261 105h |                         | ;-------------------------------------------------------------------------------
+261 105h |                         | ; Determines if a passed pixel value belongs in this NP's histogram bins and, if 
+261 105h |                         | ; so, updates the bin count.
+261 105h |                         | ;
+261 105h |                         | ; Inputs:
+261 105h |                         | ;
+261 105h |                         | ;   intensity   Pixel value to be binned, 0..255
+261 105h |                         | ;
+261 105h |                         | ; Outputs:
+261 105h |                         | ;
+261 105h |                         | ;   Local NP bins in Y and Z memory are updated
+261 105h |                         | ;
+261 105h |                         | ; Registers Modified:
+261 105h |                         | ;
+261 105h |                         | ;   r0, r1, r2, r3
+261 105h |                         | ;-------------------------------------------------------------------------------
+261 105h |                         | 
+261 105h |                         | Bin_Matching_Pixels:
+261 105h |                         | 
+261 105h |                         |     ; Check if pixel belongs in this NP's bins.
+261 105h |                         | 
+261 105h | 40C0h 0100000011000000b |     LDR     r0, intensity           ; Load this NP's current intensity
+262 106h | 21C0h 0010000111000000b |     AND     r0, HIST_NP_MASK        ; Check if this intensity belongs to this NP
+263 107h | 38C1h 0011100011000001b |     CMP     r0, hist_assignment 
+264 108h | 9001h 1001000000000001b |     ZNE     
+265 109h | 40C0h 0100000011000000b |         LDR     r0, intensity       ; Isolate the bin address
+266 10Ah | 213Fh 0010000100111111b |         AND     r0, HIST_BIN_MASK
+267 10Bh | 42D0h 0100001011010000b |         LDR     r1, r0              ; Calculate the LSB and MSB addresses
+268 10Ch | 0140h 0000000101000000b |         ADD     r0, START_OF_Y
+269 10Dh | 0380h 0000001110000000b |         ADD     r1, START_OF_Z
+270 10Eh | 44F0h 0100010011110000b |         LDR     r2, [r0]            ; Peform 16 bit addition
+271 10Fh | 46F1h 0100011011110001b |         LDR     r3, [r1]            ; Peform 16 bit addition
+272 110h | 0501h 0000010100000001b |         ADD     r2, 1
+273 111h | 0F00h 0000111100000000b |         ADC     r3, 0
+274 112h | 4CF0h 0100110011110000b |         STR     r2, [r0]            ; Save the 16 bit result
+275 113h | 4EF1h 0100111011110001b |         STR     r3, [r1]
+276 114h | 8240h 1000001001000000b |     WAK
+277 115h | 8210h 1000001000010000b |     BX
+278 116h |                         | 
+278 116h |                         | 
+278 116h |                         | 
+278 116h |                         | ;-------------------------------------------------------------------------------
+278 116h |                         | ; Output_Data_Block
+278 116h |                         | ;
+278 116h |                         | ; Description:
+278 116h |                         | ;
+278 116h |                         | ;   The output function, which dumps 64 bytes of data out through the column
+278 116h |                         | ;   data bus.  This can be called with different starting addresses to determine
+278 116h |                         | ;   whether X, Y, Z or some other block is output.
+278 116h |                         | ;
+278 116h |                         | ; Inputs:
+278 116h |                         | ;
+278 116h |                         | ;   r0          The address to begin outputing.  The last byte will be output
+278 116h |                         | ;               from address r0+63.
+278 116h |                         | ;
+278 116h |                         | ; Outputs:
+278 116h |                         | ;
+278 116h |                         | ;   -           64 bytes for each NP on column data bus.
+278 116h |                         | ;
+278 116h |                         | ; Registers Modified:
+278 116h |                         | ;
+278 116h |                         | ;   r0, r1
+278 116h |                         | ;-------------------------------------------------------------------------------
+278 116h |                         | 
+278 116h |                         | Output_Data_Block:
+278 116h |                         | 
+278 116h | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address.
+279 117h | 0340h 0000001101000000b |     ADD     r1, 64      
+280 118h |                         | 
+280 118h |                         | OUTPUT_DATA_BLOCK_LOOP:
+280 118h |                         | 
+280 118h | A0F0h 1010000011110000b |     OUT     [r0], 0          ; Row 0
+281 119h | A2F0h 1010001011110000b |     OUT     [r0], 1          ; Row 1
+282 11Ah | A4F0h 1010010011110000b |     OUT     [r0], 2          ; Row 2
+283 11Bh | A6F0h 1010011011110000b |     OUT     [r0], 3          ; Row 3
+284 11Ch | A8F0h 1010100011110000b |     OUT     [r0], 4          ; Row 4
+285 11Dh | AAF0h 1010101011110000b |     OUT     [r0], 5          ; Row 5
+286 11Eh | ACF0h 1010110011110000b |     OUT     [r0], 6          ; Row 6
+287 11Fh | AEF0h 1010111011110000b |     OUT     [r0], 7          ; Row 7
+288 120h |                         |     
+288 120h | 0101h 0000000100000001b |     ADD     r0, 1
+289 121h | 38D1h 0011100011010001b |     CMP     r0, r1
+290 122h | D181h 1101000110000001b |     BNE     OUTPUT_DATA_BLOCK_LOOP
+291 123h | 8210h 1000001000010000b |     BX 

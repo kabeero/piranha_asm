@@ -1,0 +1,1361 @@
+#!/usr/bin/python
+
+import sys
+import copy
+import re
+import datetime
+import argparse
+
+def main():
+
+    # For some debugging checks, the address bus width of the GCU is required.
+    ADDR_WIDTH = 9
+
+    # Specify the levels of debugging output available.  Higher values give more
+    # output at runtime.
+    VERBOSE_PRINT_STAGES  = 1
+    VERBOSE_PRINT_STEPS   = 2
+    VERBOSE_PRINT_MACROS  = 2
+    VERBOSE_PRINT_DEFINES = 2
+    VERBOSE_PRINT_LABELS  = 2
+    VERBOSE_PRINT_MATH    = 2
+    VERBOSE_PRINT_LINES   = 3
+
+    ############################################################################
+    # Open the input assembly file specified by the command line.  Load each
+    # line as an entry in a list.
+    ############################################################################
+
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Opening input file.'
+
+    try:
+        file_asm = open(args.infile, 'r') 
+    except IOError:
+        sys.exit('Unable to open specified input file.')
+
+    line_list = file_asm.readlines()
+    original_line_list = line_list
+    file_asm.close()
+               
+    ############################################################################
+    # Parse #macro statements.
+    ############################################################################
+                       
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Parsing all #macro statements.'
+
+    # Define the regex used to find #macro expressions.
+
+    RE_MACRO = re.compile(
+            r"\s*#macro\s+(?P<NAME>\w+)\s*\((?P<ARGS>.*)\)", re.IGNORECASE)
+    RE_ENDMACRO = re.compile(
+            r"\s*#endmacro", re.IGNORECASE)
+
+    # Search the #macro, saving a dictionary of the argument names and positions.
+
+    macro_list = []
+    temp_list = []
+    in_macro = False
+
+    n = 0
+    while n < len(line_list):
+        re_result = RE_MACRO.match(line_list[n])
+        if re_result != None:
+            macro_name = re_result.group('NAME')
+            # Split the arguments into individual entries, and create an
+            # array of them based off their order.
+            macro_arg_list = re.findall(r'\w+', re_result.group('ARGS'))
+            # Now process the following lines up until a #endmacro as the body
+            # of the macro.
+            #temp_list.append("\n")
+            temp_list.append(';' + line_list[n])
+            n +=1
+            endmacro_found = False
+            macro_body_list = []
+            while (endmacro_found == False):
+                re_result = RE_ENDMACRO.match(line_list[n])
+                # This must be part of the macro body.
+                if re_result == None:
+                    macro_body_list.append(line_list[n])
+                # If this is the end, continue processing the file.
+                else:
+                    endmacro_found = True
+                #temp_list.append("\n")
+                temp_list.append(';' + line_list[n])
+                n +=1
+            macro_list.append([macro_name, macro_arg_list, macro_body_list])
+        else:
+            temp_list.append(line_list[n])
+            n += 1
+    line_list = temp_list
+
+    if args.verbose_level >= VERBOSE_PRINT_MACROS:
+        print "The following #macro definitions were found:",
+        print macro_list
+
+    ############################################################################
+    # Populate macros.
+    ############################################################################
+                        
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Populating all macros.'
+                            
+    for entry in macro_list:
+        temp_list = []
+        macro_name = entry[0]
+        macro_args = entry[1]
+        macro_body = entry[2]
+        re_macro = re.compile(r"\s*(?P<NAME>" + macro_name + r")\s*\((?P<ARGS>.*)\)", re.IGNORECASE)
+        for line_num, line in enumerate(line_list):
+            # Make sure any match is not actually the original macro definition.
+            re_macro_definition_check = RE_MACRO.search(line)
+            re_result = re_macro.search(line)
+            #re_result = re_macro.findall(line)
+            if re_result != None and re_macro_definition_check == None:
+                if args.verbose_level >= VERBOSE_PRINT_MACROS:
+                    print 'Macro found on line %d: %s' % (line_num+1, line)
+                # For each matching line, the macro must be expanded, replacing each
+                # substitution in every line.
+                find_list = macro_args
+                replace_list = re.findall(r'[\[\]\w]+', re_result.group('ARGS'))
+                # Check that these are the same length.
+                if len(find_list) != len(replace_list):
+                    message = "Macro has a different number of arguments compared to its definition.  This is likely due to unrecognized characters or delimiters, which requires the REGEX to be updated."
+                    print_error(line_num+1, original_line_list[line_num], message)
+                    sys.exit()
+                # Sort the arguments from longest to shortest.  This prevents a bug
+                # where a macro label ($longname) is incorrectly substituted when a
+                # shorter macro label matches the initial characters ($long).
+                find_list    = [f for (f,r) in sorted(zip(find_list, replace_list), key=len)]
+                replace_list = [r for (f,r) in sorted(zip(find_list, replace_list), key=len)]
+                find_list.reverse()
+                replace_list.reverse()
+                # For each line of the macro, perform all replacements and
+                # insert it into the file.
+                for macro_line in macro_body:
+                    temp_line = macro_line
+                    for i, entry in enumerate(find_list):
+                        temp_line = re.sub('\$' + find_list[i], replace_list[i], temp_line, re.IGNORECASE)
+                    temp_list.append(temp_line)
+            else:
+                temp_list.append(line)
+
+        line_list = temp_list
+
+    macro_line_list = copy.deepcopy(line_list)
+                             
+    ############################################################################
+    # Strip all comments.  Lines with only comments are replaced with a blank
+    # line.
+    ############################################################################
+
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Removing all comments from input.'
+
+    temp_list = []
+    for line_num, line in enumerate(line_list):
+        start_of_comment = line.find(';')
+        if start_of_comment != -1:
+            temp_list.append(line[0:start_of_comment] + "\n")
+        else:
+            temp_list.append(line)
+
+        if args.verbose_level >= VERBOSE_PRINT_LINES:
+            print ("%s|%s") % (str(line_num+1).rjust(4), temp_list[line_num]),
+
+    line_list = temp_list
+
+    ############################################################################
+    # Generate a list of all #define substitutions.  Clears original #define
+    # lines to blank ones.
+    ############################################################################
+
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Indexing all #define statements.'
+
+    # Define the regex used to find #define expressions.
+    # TODO: Make this regex work with #defines in math expression, like:
+    #   #define MY_CONST    45
+    #   #define NEW_CONST   {MY_CONST+1}
+    # Currently the constant converter (from hex to decimal, for example)
+    # tokenizes this as "45" and "+1", removes the redundant "+" and the
+    # result is "{451}, which is sent to the math expression evaluator, 
+    # resulting in a final value of 451 instead of 46.  Inserting spaces
+    # between the operator and number, {MY_CONST + 1} bypasses that problem,
+    # but then the #define regex below doesn't work since it expects names
+    # with no whitespace characters.
+
+    RE_DEFINE = re.compile(
+            r"#define\s+(?P<FIND>\w+)\s+(?P<REPLACE>\S+)", re.IGNORECASE)
+
+    # Search each line for #defines, saving a dictionary of them.
+
+    define_list = []
+    temp_list = []
+    for line in line_list:
+        re_result = RE_DEFINE.findall(line)
+        if len(re_result) != 0:
+            # Replace any #define line with a blank line.
+            temp_list.append("\n")
+            for match in re_result:
+                define_list.append([match[0], match[1]])
+        else:
+            temp_list.append(line)
+    line_list = temp_list
+
+    if args.verbose_level >= VERBOSE_PRINT_DEFINES:
+        print "The following #define substitutions were found:"
+        for key, replacement in sorted(define_list):
+            print '    ' + key + ': ' + replacement
+
+    ############################################################################
+    # Perform the #define substitutions.
+    ############################################################################
+
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Executing #define substitutions.'
+
+    # First go through the define list and resolve defines which depend on
+    # other, earlier defines.
+
+    if args.verbose_level >= VERBOSE_PRINT_STEPS:
+        print 'Searching for #define replacements in other #defines.'
+
+    for src_index in range(len(define_list)):
+
+        find_str = r"\b" + define_list[src_index][0] + r"\b"
+        replace_str = str(define_list[src_index][1])
+
+        for dst_index in range(len(define_list)):
+            # Defines only affect those after themselves.
+            if dst_index > src_index: 
+                define_list[dst_index][1] = re.sub(find_str, replace_str, define_list[dst_index][1])
+                #print define_list[dst_index][1]
+
+    # Then move on to the rest of the file.
+                             
+    if args.verbose_level >= VERBOSE_PRINT_STEPS:
+        print 'Searching for #define replacements in the file body.'
+
+    for entry in define_list:
+        temp_list = []
+        for line in line_list:
+            find_str = r"\b" + entry[0] + r"\b"
+            replace_str = str(entry[1])
+            temp_list.append(re.sub(find_str, replace_str, line))
+        line_list = temp_list
+                             
+    ############################################################################
+    # Generate a list of all labels along with their original line numbers.
+    # They are stripped from the line after that.
+    ############################################################################
+
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Indexing all labels with their program addresses.'
+
+    # Define the regex used to find <labelname>: expressions.
+
+    RE_LABEL = re.compile(r"\s*(?P<LABELNAME>\w+):", re.IGNORECASE)
+
+    # Search each line for labels, saving a dictionary of them with associated
+    # line numbers.
+
+    if args.verbose_level >= VERBOSE_PRINT_STEPS:
+        print 'Creating a dictionary with all labels and their line numbers.'
+
+    label_dict = {}
+    temp_list = []
+    for n,line in enumerate(line_list):
+        re_result = RE_LABEL.match(line.upper())
+        if re_result != None:
+            # Check if this is a duplicate label.
+            if re_result.group('LABELNAME') in label_dict:
+                print_error(n+1, macro_line_list[n], "Duplicate label name found.  All labels must be unique.")
+            else:
+                temp_list.append("\n")
+                label_dict[re_result.group('LABELNAME')] = n + 1
+        else:
+            temp_list.append(line)
+    line_list = temp_list
+                   
+    if args.verbose_level >= VERBOSE_PRINT_LABELS:
+        print "The following labels were found:"
+        for label, address in  sorted(label_dict.iteritems()):
+            print '    ' + label + ': ' + str(address)
+                             
+    ############################################################################
+    # Determine which lines have opcodes on them.  The assumption is that, with
+    # with all comments, #defines, and labels removed, any line with text
+    # remaining should be an opcode.
+    ############################################################################
+    
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Building list of which lines have opcodes.'
+
+    prog_address_list = []
+    prog_addr = 0
+    for line in line_list:
+        # Record what program address this asm line corresponds to.
+        prog_address_list.append(prog_addr)
+        # Check if any text remains.  If so, it is assumed to be an opcode.
+        if len(line.strip()) != 0:
+            # All instructions assumed to be one word long.
+            prog_addr += 1
+
+    # If this program reaches beyond the limits of what an NP can
+    # address, issue a warning to the user.
+    if (prog_addr >= 2**ADDR_WIDTH-1):
+        print 'WARNING: compiled program length (%d words) is larger than address space (%d words).' % (prog_addr, 2**ADDR_WIDTH)
+
+    
+    ############################################################################
+    # Replace label references with the actual program address.
+    ############################################################################
+                      
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Populating referenced labels with their program address.'
+
+    for key in label_dict:
+        temp_list = []
+        for line in line_list:
+            find_str = r"\b" + key.upper() + r"\b"
+            replace_str = str(prog_address_list[label_dict[key]])
+            temp_list.append(re.sub(find_str, replace_str, line.upper(), re.IGNORECASE))
+        line_list = temp_list
+
+    ############################################################################
+    # Find all numeric arguments and convert them to signed decimal.
+    ############################################################################
+                                       
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Converting all numeric values to signed decimal.'
+
+    # Use a regex to isolate each type of numeric representation in the 
+    # assembly language.  This matches binary, hex, and decimal values.
+    NUMBER    = r"(?:(?:\b[0-1]+B\b)|(?:\b[0-9A-F]+H\b)|(?:[+-]*\b[0-9]+\b))"
+    RE_NUMBER = re.compile(NUMBER, re.IGNORECASE)
+                  
+    temp_list = []
+    for line_num, line in enumerate(line_list):
+ 
+        re_result = RE_NUMBER.findall(line)
+        temp_line = line
+        if len(re_result) != 0:
+            for match in re_result:
+                # Convert the matched string to decimal first.
+                # First convert to uppercase.
+                str_upper = match.upper()
+                # Hex
+                if   str_upper[-1] == 'H':
+                    dec = int(str_upper[0:-1], 16)
+                # Binary
+                elif str_upper[-1] == 'B':
+                    dec = int(str_upper[0:-1], 2)
+                # Decimal
+                else:
+                    # It may have multiple +- characters at the front, so these
+                    # need to be removed and reduced.
+                    # All "+" can be removed without any loss.
+                    # Count the number of "-".  If even, remove all of them.
+                    # If odd, remove all and then insert a single "-".
+                    str_no_plus = str_upper.replace("+","")
+                    num_minus = 0
+                    for character in match:
+                        if character == "-":
+                            num_minus += 1
+                    # Remove all "-" chars
+                    str_no_minus = str_no_plus.replace("-","")
+                    # If originally an odd number of "-", add one back in.
+                    if num_minus % 2 != 0:
+                        dec = int("-" + str_no_minus, 10)        
+                    else:
+                        dec = int(str_no_minus, 10)        
+
+                ## Convert the decimal value to 2's compliment.
+                ## If negative, take twos compliment.
+                #if dec < 0:
+                #    dec = 2**8 + dec                       
+
+                ## Get the binary string, cut off "0b", right align and fill 
+                ## with 0s.
+                #binary = bin(val)[2:].rjust(n, '0')
+                # Write the new value into the line.  
+
+                temp_line = temp_line.replace(match, str(dec))
+        temp_list.append(temp_line)
+    line_list = temp_list
+                            
+    ############################################################################
+    # Search for mathematical expression encolsed in braces {} and use python's
+    # eval() function.  Any expression contained in such braces will be passed
+    # directly to the function, for better or for worse.
+    ############################################################################
+
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Evaluating mathematical statements enclosed in curly braces {}.'
+
+    temp_list = []
+    EVAL_EXPRESSION    = r"\{.*\}"
+    RE_EVAL_EXPRESSION = re.compile(EVAL_EXPRESSION, re.IGNORECASE)
+    for line_num, line in enumerate(line_list):
+        re_result = RE_EVAL_EXPRESSION.findall(line)
+        temp_line = line
+        if len(re_result) != 0:
+            for match in re_result:
+                # Remove braces.
+                expression = re.sub('{', '(', match)
+                expression = re.sub('}', ')', expression)
+                replace = str(eval(expression))
+                if args.verbose_level >= VERBOSE_PRINT_MATH:
+                    print '    Line %d: ' % (line_num+1) + expression + ' = ' + replace
+
+                temp_line = temp_line.replace(match, replace)
+        temp_list.append(temp_line)
+    line_list = temp_list
+           
+    ############################################################################
+    #
+    # END OF PREPROCESSOR
+    #
+    ############################################################################
+ 
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Preprocessor operations complete.'
+
+    if args.pre:
+        filename = output_path + base_file_name + ".pre"
+        save_list_to_file(line_list, filename)
+
+    ############################################################################
+    #
+    # BEGIN STANDARD ASSEMBLER
+    #
+    ############################################################################
+   
+
+    ############################################################################
+    # Search for each type of data source and convert it to binary.
+    ############################################################################
+
+    SRC_ACC_DICT = {
+        "R0"      : "-----00---------", 
+        "R1"      : "-----01---------", 
+        "R2"      : "-----10---------", 
+        "R3"      : "-----11---------"}
+
+    SRC_DATA_DICT = {
+        "X"       : "-------000------", 
+        "Y"       : "-------001------", 
+        "Z"       : "-------010------",
+        "V"       : "-------011------",
+
+        "V0"      : "-------011000000",
+        "V1"      : "-------011000001",
+        "V2"      : "-------011000010",
+        "V3"      : "-------011000011",
+        "V4"      : "-------011000100",
+        "V5"      : "-------011000101",
+        "V6"      : "-------011000110",
+        "V7"      : "-------011000111",
+
+        "R0"      : "-------011010000",
+        "R1"      : "-------011010001",
+        "R2"      : "-------011010010",
+        "R3"      : "-------011010011",
+
+        "N"       : "-------011100001",
+        "S"       : "-------011100010",
+        "W"       : "-------011100100",
+        "E"       : "-------011101000",
+
+        "R0_IND"  : "-------011110000",
+        "R1_IND"  : "-------011110001",
+        "R2_IND"  : "-------011110010",
+        "R3_IND"  : "-------011110011",
+
+        "SR"      : "-------011110100",
+        "RCR"     : "-------011111000"}
+
+    OP_ALU_DICT = {
+        "ADD"     : "00000-----------",
+        "ADC"     : "00001-----------",
+        "SUB"     : "00010-----------",
+        "SBB"     : "00011-----------",
+        "AND"     : "00100-----------",
+        "ORR"     : "00101-----------",
+        "EOR"     : "00110-----------",
+        "CMP"     : "00111-----------",
+        "LDR"     : "01000-----------",
+        "STR"     : "01001-----------"}
+
+    OP_OUT_DICT = {
+        "OUT"     : "101-------------"}
+
+    OP_BRANCH_DICT = {
+        "BEQ"     : "110---------0000",
+        "BZ"      : "110---------0000",
+        "BNE"     : "110---------0001",
+        "BNZ"     : "110---------0001",
+        "BCS"     : "110---------0010",
+        "BHS"     : "110---------0010",
+        "BCC"     : "110---------0011",
+        "BLO"     : "110---------0011",
+        "BMI"     : "110---------0100",
+        "BPL"     : "110---------0101",
+        "BVS"     : "110---------0110",
+        "BVC"     : "110---------0111",
+        "BHI"     : "110---------1000",
+        "BLS"     : "110---------1001",
+        "BGE"     : "110---------1010",
+        "BLT"     : "110---------1011",
+        "BGT"     : "110---------1100",
+        "BLE"     : "110---------1101",
+        "BAL"     : "110---------1111",
+        "B"       : "110---------1111",
+        "BL"      : "111---------0000"}
+
+    OP_SLEEP_DICT = {
+        "ZEQ" : "1001000000000000",
+        "ZZ"  : "1001000000000000",
+        "ZNE" : "1001000000000001",
+        "ZNZ" : "1001000000000001",
+        "ZCS" : "1001000000000010",
+        "ZHS" : "1001000000000010",
+        "ZCC" : "1001000000000011",
+        "ZLO" : "1001000000000011",
+        "ZMI" : "1001000000000100",
+        "ZPL" : "1001000000000101",
+        "ZVS" : "1001000000000110",
+        "ZVC" : "1001000000000111",
+        "ZHI" : "1001000000001000",
+        "ZLS" : "1001000000001001",
+        "ZGE" : "1001000000001010",
+        "ZLT" : "1001000000001011",
+        "ZGT" : "1001000000001100",
+        "ZLE" : "1001000000001101",
+        "ZAL" : "1001000000001111",
+        "Z"   : "1001000000001111"}
+                             
+    OP_ONE_SRC_DICT = {
+        "ASR" : "10001--100000000",
+        "LSL" : "10001--010000000",
+        "LSR" : "10001--001000000",
+        "GTB" : "10001--000100000"}
+
+    OP_TIMER_DICT = {
+        "TINTL" : "10000100--------",
+        "TINTH" : "10000101--------",
+        "TRSTL" : "10000110--------",
+        "TRSTH" : "10000111--------"}
+
+    OP_MISC_DICT = {
+        "RST"   : "1000001100000000",
+        "NOP"   : "1000001010000000",
+        "WAK"   : "1000001001000000",
+        "IMG"   : "1000001000100000",
+        "BX"    : "1000001000010000"}
+    
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Tokenizing each opcode.'
+
+    parse_list = []
+    for line_num, line in enumerate(line_list):
+         
+        if args.verbose_level >= VERBOSE_PRINT_LINES:
+            print ("%s|%s") % (str(line_num).rjust(4), line),
+
+        result = {}
+
+        # Save each token from the line, excluding the square brackets.  To
+        # differentiate between immediates and indirect addressing, whether or
+        # not the line has brackets present is stored.  
+        # TODO: Note that the order of arguments is not checked, so this can
+        # lead to unexpected compilation results.  For example, 
+        #   STR [r0], r1
+        # would compile without error as if it read
+        #   STR r0, [r1] 
+        if re.search('\[.*\]', line) != None:
+            data_from_reg_bank = True
+        else:
+            data_from_reg_bank = False
+        temp = re.sub('[\s,\[\]]+', ' ', line.upper())
+        tokens = temp.strip().split()
+                       
+        if args.verbose_level >= VERBOSE_PRINT_LINES:
+            print "    Tokens:",
+            print tokens
+                      
+        ########################################################################
+        # Operations using both a register and a accumulator.
+        #
+        # Instruction Format:
+        #
+        #   0--------------- : Unique ID for this class of instruction.
+        #   -iiii----------- : Opcode-specific unique ID.
+        #   -----a---------- : The accumulator used in the operation.
+        #   ------0--------- : Free bit to allow data source expansion.
+        #   -------ddddddddd : Data source, given below.
+        #
+        # Data Source Format:
+        #
+        #   -------1xxxxxxxx : Immediate
+        #   -------000rrrccc : Register X, pixel (r,c)
+        #   -------001rrrccc : Register Y, pixel (r,c)
+        #   -------010rrrccc : Register Z, pixel (r,c)
+        #   -------011000001 : Indirect register addressing using ACC B.
+        #   -------011000010 : ACC A.
+        #   -------011000100 : ACC B.
+        #   -------011001000 : Status register.
+        #   -------011010000 : Row-column register.
+        #   -------011100001 : NW neighborhood register.
+        #   -------011100010 : NE neighborhood register.
+        #   -------011100100 : SW neighborhood register.
+        #   -------011101000 : SE neighborhood register.
+        #
+        # Examples:     
+        #
+        #   ADD     A, X[7,7]
+        #   XOR     B, Y[55]
+        #   STR     A, Z[0,3]
+        #   LDR     A, [B]
+        #   CMP     A, RCR
+        #
+        ########################################################################
+
+        if len(tokens) != 0 and tokens[0] in OP_ALU_DICT.keys():
+
+            # Expected number of tokens if using 1D or 2D addressing.
+            LEN_ADDR_1D = 4
+            LEN_ADDR_2D = 5
+        
+            result["OPCODE"] = {}
+            result["OPCODE"]["NAME"]   = tokens[0]
+            result["OPCODE"]["BINARY"] = OP_ALU_DICT[tokens[0]]
+            result["ACC"] = {}
+            result["ACC"]["NAME"]      = tokens[1]
+            result["ACC"]["BINARY"]    = SRC_ACC_DICT[tokens[1]]
+            result["DATA_SRC"] = {}
+
+            # Check if the data source is the register bank.
+            if data_from_reg_bank == True:
+
+                # Check if this is normal register addressing.
+                if (tokens[2] == "X" or tokens[2] == "Y" or tokens[2] == "Z" or tokens[2] == "V"):
+                    result["VALUE"]    = {}
+                    result["DATA_SRC"]["NAME"]   = tokens[2]
+                    result["DATA_SRC"]["BINARY"] = SRC_DATA_DICT[tokens[2]]
+                    # Resolve 2D or 1D register addressing.
+                    if   len(tokens) == LEN_ADDR_2D:
+                        value = int(tokens[3])*8 + int(tokens[4])
+                    elif len(tokens) == LEN_ADDR_1D:
+                        value = int(tokens[3])
+                    else:
+                        print_error(n+1, macro_line_list[n], "Incorrect number of arguments.")
+                    result["VALUE"]["NAME"]   = str(value)
+                    try:
+                        result["VALUE"]["BINARY"] = int2bits(value, (5,4,3,2,1,0))
+                    except ValueError, message:
+                        print_error(line_num+1, macro_line_list[line_num], message)
+                        sys.exit()
+                    result["VALUE"]["INT"]    = value
+
+                # Check if this is indirect addressing using a register.  For
+                # ALU operations, this comes as the third argument.  For
+                # example, ADD r0, [r3].
+                if (tokens[2] == "R0"):
+                    result["DATA_SRC"]["NAME"]   = "Indirect Addressing with R0"
+                    result["DATA_SRC"]["BINARY"] = SRC_DATA_DICT["R0_IND"]
+                elif (tokens[2] == "R1"):
+                    result["DATA_SRC"]["NAME"]   = "Indirect Addressing with R1"
+                    result["DATA_SRC"]["BINARY"] = SRC_DATA_DICT["R1_IND"]
+                elif (tokens[2] == "R2"):
+                    result["DATA_SRC"]["NAME"]   = "Indirect Addressing with R2"
+                    result["DATA_SRC"]["BINARY"] = SRC_DATA_DICT["R2_IND"]
+                elif (tokens[2] == "R3"):
+                    result["DATA_SRC"]["NAME"]   = "Indirect Addressing with R3"
+                    result["DATA_SRC"]["BINARY"] = SRC_DATA_DICT["R3_IND"]
+
+            # Check if the data source is a valid integer.  If so, it must be
+            # an immediate value.
+            elif is_imm(tokens[2]):
+                value = int(tokens[2])
+                result["VALUE"]    = {}
+                result["DATA_SRC"]["NAME"]   = "Immediate"
+                result["DATA_SRC"]["BINARY"] = "-------1--------"
+                result["VALUE"]["NAME"]   = str(value)
+                try:
+                    result["VALUE"]["BINARY"] = int2bits(value, (7,6,5,4,3,2,1,0))
+                except ValueError, message:
+                    print_error(line_num+1, macro_line_list[line_num], message)
+                    sys.exit()
+                result["VALUE"]["INT"]    = value
+
+            # Check if the data source is a special register like the SR, RCR,
+            # or neighborhood registers.  If not a register bank source, it
+            # is assumed to be this type.
+            else:
+                try:
+                    result["DATA_SRC"]["NAME"]   = tokens[2]
+                    result["DATA_SRC"]["BINARY"] = SRC_DATA_DICT[tokens[2]]
+                except KeyError:
+                    message = "Invalid data source.  Is the name a #define?"
+                    print_error(line_num+1, macro_line_list[line_num], message)
+                    sys.exit()
+                    
+
+        ########################################################################
+        # Operations outputing a data source onto the column data buses.
+        #
+        # Instruction Format:
+        #
+        #   101------------- : Unique ID for this class of instruction.
+        #   ---eeee--------- : Which row to output onto the bus.
+        #   -------ddddddddd : Data source, given below.
+        #
+        # Data Source Format:
+        #
+        #   --Needs updated--
+        #
+        # Examples:     
+        #
+        #   OUT     A, 5
+        #   OUT     Y[55], 0
+        #   OUT     RCR, 15
+        #   OUT     [B], 4
+        #
+        ########################################################################
+                        
+        elif len(tokens) != 0 and tokens[0] in OP_OUT_DICT.keys():
+
+            # Expected number of tokens if using 1D or 2D addressing.
+            LEN_ADDR_1D = 4
+            LEN_ADDR_2D = 5
+        
+            result["OPCODE"]   = {}
+            result["OPCODE"]["NAME"]   = tokens[0]
+            result["OPCODE"]["BINARY"] = OP_OUT_DICT[tokens[0]]
+            result["DATA_SRC"] = {}
+            result["ROW"] = {}
+
+            # Check if the data source is the register bank.
+            if data_from_reg_bank == True:
+
+                # Check if this is normal register addressing.
+                if (tokens[1] == "X" or tokens[1] == "Y" or tokens[1] == "Z" or tokens[1] == "V"):
+                    result["VALUE"]    = {}
+                    result["DATA_SRC"]["NAME"]   = tokens[1]
+                    result["DATA_SRC"]["BINARY"] = SRC_DATA_DICT[tokens[1]]
+                    # Resolve 2D or 1D register addressing.
+                    if   len(tokens) == LEN_ADDR_2D:
+                        value = int(tokens[2])*8 + int(tokens[3])
+                    elif len(tokens) == LEN_ADDR_1D:
+                        value = int(tokens[2])
+                    else:
+                        print_error(n+1, macro_line_list[n], "Incorrect number of arguments.")
+                    result["VALUE"]["NAME"]   = str(value)
+                    try:
+                        result["VALUE"]["BINARY"] = int2bits(value, (5,4,3,2,1,0))
+                    except ValueError, message:
+                        print_error(line_num+1, macro_line_list[line_num], message)
+                        sys.exit()
+                    result["VALUE"]["INT"]    = value
+                                    
+                # Check if this is indirect addressing using a register.  For
+                # OUT instructions, this is the second argument. (OUT [r1], 0)
+                if (tokens[1] == "R0"):
+                    result["DATA_SRC"]["NAME"]   = "Indirect Addressing with R0"
+                    result["DATA_SRC"]["BINARY"] = SRC_DATA_DICT["R0_IND"]
+                elif (tokens[1] == "R1"):
+                    result["DATA_SRC"]["NAME"]   = "Indirect Addressing with R1"
+                    result["DATA_SRC"]["BINARY"] = SRC_DATA_DICT["R1_IND"]
+                elif (tokens[1] == "R2"):
+                    result["DATA_SRC"]["NAME"]   = "Indirect Addressing with R2"
+                    result["DATA_SRC"]["BINARY"] = SRC_DATA_DICT["R2_IND"]
+                elif (tokens[1] == "R3"):
+                    result["DATA_SRC"]["NAME"]   = "Indirect Addressing with R3"
+                    result["DATA_SRC"]["BINARY"] = SRC_DATA_DICT["R3_IND"]
+                                    
+            # Check if the data source is a valid integer.  If so, it must be
+            # an immediate value.
+            elif is_imm(tokens[1]):
+                value = int(tokens[1])
+                result["VALUE"]    = {}
+                result["DATA_SRC"]["NAME"]   = "Immediate"
+                result["DATA_SRC"]["BINARY"] = "-------1--------"
+                result["VALUE"]["NAME"]   = str(value)
+                try:
+                    result["VALUE"]["BINARY"] = int2bits(value, (7,6,5,4,3,2,1,0))
+                except ValueError, message:
+                    print_error(line_num+1, macro_line_list[line_num], message)
+                    sys.exit()
+                result["VALUE"]["INT"]    = value
+
+            # Check if the data source is a special register like the SR, RCR,
+            # or neighborhood registers.  If not a register bank source, it
+            # is assumed to be this type.
+            else:
+                result["DATA_SRC"]["NAME"]   = tokens[1]
+                result["DATA_SRC"]["BINARY"] = SRC_DATA_DICT[tokens[1]]
+     
+            # The last token should be the row number.
+            value = int(tokens[-1])
+            try:
+                result["ROW"]["BINARY"] = int2bits(value, (12,11,10,9))
+            except ValueError, message:
+                print_error(line_num+1, macro_line_list[line_num], message)
+                sys.exit()
+            result["ROW"]["INT"]    = value
+                       
+        ########################################################################
+        # Operations involving setting ADC timer delays.
+        #
+        # Instruction Format:
+        #
+        #   100001---------- : Unique ID for this class of instruction.
+        #   ------ff-------- : Timer register selection bits.
+        #   --------tttttttt : Timer compare bits.
+        #
+        # Register selection format:
+        #
+        #   ------00-------- : LSB of integration time register.
+        #   ------01-------- : MSB of integration time register.
+        #   ------10-------- : LSB of photodiode reset time register.
+        #   ------11-------- : MSB of photodiode reset time register.
+        #
+        # Examples:     
+        #
+        #   TINTL   45
+        #   TRSTH   7Fh
+        #
+        ########################################################################
+                        
+        elif len(tokens) != 0 and tokens[0] in OP_TIMER_DICT.keys():
+            result["OPCODE"]   = {}
+            result["OPCODE"]["NAME"]   = tokens[0]
+            result["OPCODE"]["BINARY"] = OP_TIMER_DICT[tokens[0]]
+            # Convert numeric argument to binary.
+            value = int(tokens[1])
+            result["VALUE"]    = {}
+            result["VALUE"]["NAME"]   = str(value)
+            try:
+                result["VALUE"]["BINARY"] = int2bits(value, (7,6,5,4,3,2,1,0))
+            except ValueError, message:
+                print_error(line_num+1, macro_line_list[line_num], message)
+                sys.exit()
+            result["VALUE"]["INT"]    = value
+                         
+        ########################################################################
+        # Operations involving branching between program addresses.
+        #
+        # Instruction Format:
+        #
+        #   110------------- : Unique ID for this class of instruction.
+        #   ---bbbbbbbbb---- : branch destination address.
+        #   ------------xxxx : Condition bits.
+        #
+        # Condition Format:
+        #
+        #   ------------0000 : Branch if equal
+        #   ------------0001 : Branch if not equal
+        #   ------------0010 : Branch if carry set/higher or the same (uns)
+        #   ------------0011 : Branch if carry clear/lower (uns)
+        #   ------------0100 : Branch if negative
+        #   ------------0101 : Branch if positive or zero
+        #   ------------0110 : Branch if overflow set
+        #   ------------0111 : Branch if overflow clear
+        #   ------------1000 : Branch if higher (uns)
+        #   ------------1001 : Branch if lower or same (uns)
+        #   ------------1010 : Branch if greater than or equal (sgn)
+        #   ------------1011 : Branch if less than (sgn)
+        #   ------------1100 : Branch if greater than (sgn)
+        #   ------------1101 : Branch if less than or equal (sgn)
+        #   ------------1111 : Branch always
+        #
+        # Examples:     
+        #
+        #   B       labelA  ; Branch unconditionally
+        #   BVC     labelB  ; Branch if overflow flag is clear
+        #   BNE     labelC  ; Branch if not equal
+        #
+        ########################################################################
+                        
+        elif len(tokens) != 0 and tokens[0] in OP_BRANCH_DICT.keys():
+            result["OPCODE"]   = {}
+            result["OPCODE"]["NAME"]   = tokens[0]
+            result["OPCODE"]["BINARY"] = OP_BRANCH_DICT[tokens[0]]
+            # Convert address to binary.
+            try:
+                value = int(tokens[1].upper())
+            except IndexError:
+                message = "Missing label name in branch instruction."
+                print_error(line_num+1, macro_line_list[line_num], message)
+            except ValueError:
+                message = "Label name does not exist."
+                print_error(line_num+1, macro_line_list[line_num], message)
+            result["VALUE"]         = {}
+            result["VALUE"]["NAME"] = str(value)
+            result["VALUE"]["INT"]  = value
+            try:
+                result["VALUE"]["BINARY"] = int2bits(value, (12,11,10,9,8,7,6,5,4))
+            except ValueError, message:
+                print_error(line_num+1, macro_line_list[line_num], message)
+                sys.exit()
+                                                                                  
+        ########################################################################
+        # Operations involving NPs entering sleep mode.
+        #
+        # Instruction Format:
+        #
+        #   1001------------ : Unique ID for this class of instruction.
+        #   ----00000000---- : Unused bits.
+        #   ------------xxxx : Condition bits.
+        #
+        # Condition Format:
+        #
+        #   ------------0000 : Branch if equal
+        #   ------------0001 : Branch if not equal
+        #   ------------0010 : Branch if carry set/higher or the same (uns)
+        #   ------------0011 : Branch if carry clear/lower (uns)
+        #   ------------0100 : Branch if negative
+        #   ------------0101 : Branch if positive or zero
+        #   ------------0110 : Branch if overflow set
+        #   ------------0111 : Branch if overflow clear
+        #   ------------1000 : Branch if higher (uns)
+        #   ------------1001 : Branch if lower or same (uns)
+        #   ------------1010 : Branch if greater than or equal (sgn)
+        #   ------------1011 : Branch if less than (sgn)
+        #   ------------1100 : Branch if greater than (sgn)
+        #   ------------1101 : Branch if less than or equal (sgn)
+        #   ------------1111 : Branch always
+        #
+        # Examples:     
+        #
+        #   ZGT     labelA  ; Sleep if greater than (signed)
+        #   ZLE     labelB  ; Sleep if less than or equal (signed)
+        #   ZHS     labelC  ; Sleep if higher than or the same (unsigned)
+        #
+        ########################################################################
+                        
+        elif len(tokens) != 0 and tokens[0] in OP_SLEEP_DICT.keys():
+
+            result["OPCODE"]   = {}
+            result["OPCODE"]["NAME"]   = tokens[0]
+            result["OPCODE"]["BINARY"] = OP_SLEEP_DICT[tokens[0]]
+ 
+        ########################################################################
+        # Operations on one register using the ALU.
+        #
+        # Instruction Format:
+        #
+        #   10001----------- : Unique ID for this class of instruction.
+        #   -----rr--------- : The register used in the operation.
+        #   -------iiii----- : Opcode-specific unique ID.
+        #   -----------00000 : Unused bits.
+        #
+        # Examples:     
+        #
+        #   ASR     r0
+        #   LSR     r1
+        #   LSL     r2
+        #   GTB     r3
+        #
+        ########################################################################
+
+        elif len(tokens) != 0 and tokens[0] in OP_ONE_SRC_DICT.keys():
+
+            # Check the number of arguments.  It is tempting to place a numeric
+            # argument for the number of bits to shift, but these are set to
+            # shift only a single bit.
+            try:
+                max_one_src_tokens = 2
+                min_one_src_tokens = 2
+                check_num_tokens(tokens, min_one_src_tokens, max_one_src_tokens)
+            except ValueError, message:
+                print_error(line_num+1, macro_line_list[line_num], message)
+                sys.exit()
+
+            result["OPCODE"] = {}
+            result["OPCODE"]["NAME"]   = tokens[0]
+            result["OPCODE"]["BINARY"] = OP_ONE_SRC_DICT[tokens[0]]
+
+            result["ACC"] = {}
+            result["ACC"]["NAME"]      = tokens[1]
+            result["ACC"]["BINARY"]    = SRC_ACC_DICT[tokens[1]]
+             
+        ########################################################################
+        # Operations involving no arguments, usually system-level.
+        #
+        # Instruction Format:
+        #
+        #   100001---------- : Unique ID for this class of instruction.
+        #   ------iiiii----- : Opcode-specific unique ID bits.
+        #   -----------00000 : Unused bits.
+        #
+        # Examples:     
+        #
+        #   RST
+        #   NOP
+        #   WAK
+        #
+        ########################################################################
+                        
+        elif len(tokens) != 0 and tokens[0] in OP_MISC_DICT.keys():
+
+            result["OPCODE"]   = {}
+            result["OPCODE"]["NAME"]   = tokens[0]
+            result["OPCODE"]["BINARY"] = OP_MISC_DICT[tokens[0]]
+
+        ########################################################################
+        # If none are matches and the line is not blank, this is a syntax error.
+        ########################################################################
+
+        elif len(tokens) != 0:
+            message = "Unrecognized opcode %s." % tokens[0]
+            print_error(line_num+1, macro_line_list[line_num], message)
+
+        ########################################################################
+        # Save entry for line to the list of parsed lines.
+        ########################################################################
+
+        parse_list.append(result)
+
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Opcode parsing complete.'
+
+    ############################################################################
+    # For each line, read each parsed token and combine the binary strings to
+    # produce the final binary word.  Errors are generated if any bits overlap,
+    # or if a bit is left unspecified.
+    ############################################################################
+
+    if args.verbose_level >= VERBOSE_PRINT_STAGES:
+        print 'Performing binary replacements on parsed opcode tokens.'
+
+    temp_list = []
+    for line_num, line_entry in enumerate(parse_list):
+        if len(line_entry) == 0:
+            temp_list.append(" "*16)
+        else:
+            instruction = list("-"*16)
+            for token in line_entry.keys():
+                for b, cur_bit in enumerate(instruction):
+                    try:
+                        new_bit = line_entry[token]["BINARY"][b]
+                    except KeyError:
+                        message = "Unable to find binary string for token."
+                        print_error(line_num+1, macro_line_list[line_num], message)
+                        sys.exit()
+                    # No update.
+                    if   new_bit == '-':
+                        instruction[b] = instruction[b]
+                    # Clear to 0.
+                    elif new_bit == '0' and cur_bit == '-':
+                        instruction[b] = '0'
+                    # Set to 1.
+                    elif new_bit == '1' and cur_bit == '-':
+                        instruction[b] = '1'
+                    # Error.  Likely the dictionary-based lookup tables have the
+                    # wrong bit patterns, or they are out of alignment, so that
+                    # two of them overlap, which is checked.
+                    else:
+                        message = "Bit collision when combining instruction bit slices."
+                        print_error(line_num+1, macro_line_list[line_num], message)
+            # Check the finished instructions to verify every bit is specified.
+            unspecied_bits = False
+            for b, cur_bit in enumerate(instruction):
+                if cur_bit == '-':
+                    unspecied_bits = True
+            if unspecied_bits == True:
+                message = "Unspecified bits in instruction.  Verify lookup tables in assembler."
+                print_error(line_num+1, macro_line_list[line_num], message)
+            # Update the line with the binary representation.
+            temp_list.append("".join(instruction))
+    
+    line_list = temp_list                      
+ 
+    ############################################################################
+    # Generate the output files.
+    ############################################################################
+            
+    ############################################################################
+    # Create the listing file if the command line flag is enabled.
+    ############################################################################
+
+    if args.list:
+        try:
+            filename = output_path + base_file_name + ".lst"
+            out_file = open(filename, 'w')
+        except IOError:
+            sys.exit("Unable to create the listing file on the filesystem.")
+            
+        for line_num, line in enumerate(line_list):
+            addr = prog_address_list[line_num]
+            if len(macro_line_list) < 100:
+                max_dec_digits = 2
+            elif len(macro_line_list) < 1000:
+                max_dec_digits = 3
+            else :
+                max_dec_digits = 4
+
+            out_file.write("%s %03Xh | " % (str(addr).rjust(max_dec_digits), addr))
+            # Check if this is a non-opcode line.
+            try:
+                out_file.write("%04Xh %sb | "     % (int(line, 2), line))
+            except ValueError:
+                out_file.write("%s %s   | "     % (" "*4, line))
+            out_file.write(macro_line_list[line_num])
+        out_file.close()
+              
+    ############################################################################
+    # Create the ascii-encoded binary file if the command line flag is enabled.
+    ############################################################################
+
+    if args.ascii:
+        try:
+            filename = output_path + base_file_name + ".txt"
+            out_file = open(filename, 'w')
+        except IOError:
+            sys.exit("Unable to create the ascii file on the filesystem.")
+            
+        for line_num, line in enumerate(line_list):
+            if len(line.strip()) != 0:
+                out_file.write(line + "\n")
+        out_file.close()
+             
+    ############################################################################
+    # Create the binary file if the command line flag is enabled.
+    ############################################################################
+
+    if args.bin:
+        try:
+            filename = output_path + base_file_name + ".bin"
+            out_file = open(filename, 'w')
+        except IOError:
+            sys.exit("Unable to create the binary file on the filesystem.")
+            
+        for line_num, line in enumerate(line_list):
+            if len(line.strip()) != 0:
+                out_file.write("%c" % int(line[8:16], 2))
+                out_file.write("%c" % int(line[0:8], 2))
+        out_file.close()
+    
+    ############################################################################
+    # Create a VHDL package with the program instructions if the command line 
+    # flag is enabled.
+    ############################################################################
+                           
+    # Header and footer text to make the output sythesizable without modification.
+    OUTPUT_FILE_HEADER = (  "library ieee;\n"
+                            "library vision;\n"
+                            "use ieee.std_logic_1164.all;\n"
+                            "use ieee.numeric_std.all;\n"
+                            "use vision.pkg_basic.all;\n"
+                            "use vision.pkg_np.all;\n"
+                            "use vision.pkg_gcu.all;\n"
+                            "\n"
+                            "entity rom is\n"
+                            "    generic (\n"
+                            "        DATA_WIDTH : natural := 16;\n"
+                            "        ADDR_WIDTH : natural := 10);\n"
+                            "    port ( \n"
+                            #"        clk  : in  sl;\n"
+                            "        a    : in  gcu_addr_t;\n"
+                            "        q    : out gcu_instr_t);\n"
+                            "end rom;\n"
+                            "\n"
+                            "architecture behavioral of rom is\n"
+                            "\n"
+                            "    type rom_t is array (0 to 2**ADDR_WIDTH-1) of gcu_instr_t;\n"
+                            "    constant rom : rom_t := (\n"
+                            )
+                           
+
+    OUTPUT_FILE_FOOTER = (  "      others => \"0000000000000000\");\n"
+                            "\n"
+                            "\n"
+                            "signal a_as_int     : natural range 0 to 2**ADDR_WIDTH-1;\n"
+                            "signal a_as_int_reg : natural range 0 to 2**ADDR_WIDTH-1;\n"
+                            "\n"
+                            "begin\n"
+                            "\n"
+                            "    a_as_int <= to_integer(unsigned(a));\n"
+                            "    q <= rom(a_as_int_reg);\n"
+                            "    a_as_int_reg <= a_as_int;\n"
+                            "\n"
+                            "end behavioral;\n"
+                            )
+
+    if args.rtl:
+        try:
+            filename = output_path + base_file_name + ".vhd"
+            out_file = open(filename, 'w')
+        except IOError:
+            sys.exit("Unable to create the VHDL file on the filesystem.")
+        # Print out the header for the VHDL file.
+        out_file.write("-"*80 + "\n")
+        out_file.write("-- Generated on %s\n" % current_time.strftime("%m/%d/%Y at %H:%M:%S"))
+        out_file.write("-- Command: %s\n" % ' '.join(sys.argv))
+        out_file.write("-"*80 + "\n")
+        out_file.write(OUTPUT_FILE_HEADER)
+     
+        for line_num, line in enumerate(line_list):
+            addr = prog_address_list[line_num]
+            max_dec_digits = 4
+            # Check if this is a non-opcode line.
+            if len(line.strip()) != 0:
+                out_file.write("        %s => " % (str(addr).rjust(max_dec_digits)))
+                out_file.write("\"%s\", -- | %s" % (line, macro_line_list[line_num]))
+            else:
+                out_file.write(" "*36 + "-- | %s" % (macro_line_list[line_num]))
+        # Output the footer information to make this a valid VHDL file.
+        out_file.write(OUTPUT_FILE_FOOTER)
+        out_file.close()   
+
+################################################################################
+# Helper functions.
+################################################################################
+            
+def int2bin(val, num_bits):
+    # Typecast input to integer.
+    val = int(val)
+    n   = int(num_bits)
+    # Check to make sure it doesn't exceed the available range of values.
+    if val > 2**n-1 or val < -(2**(n-1)):
+        raise ValueError("%d is too large to fit in %d bits." % (val, n))
+                    
+    # If negative, take twos compliment.
+    if val < 0:
+        val = 2**n + val                       
+    # Get the binary string, cut off "0b", right align and fill with 0s.
+    binary = bin(val)[2:].rjust(n, '0')
+    return binary  
+
+def print_error(line_num, line_content, error):
+    print ("ERROR: %s" % error)
+    print ("    Line %d: %s" % (line_num, line_content))
+
+def is_imm(input_str):
+    try:
+        int(input_str)
+        return True
+    except ValueError:
+        return False
+
+def int2bits(value, bit_pos_list):
+    bin_value = int2bin(value, len(bit_pos_list))
+    bits = list("-"*16)
+    for i, index in enumerate(bit_pos_list):
+        bits[15-index] = bin_value[i]
+    return "".join(bits)
+
+def save_list_to_file(line_list, filename):
+    try:
+        out_file = open(filename, 'w')
+    except IOError:
+        sys.exit("Unable to create the file %s." % filename)
+    for line in line_list:
+        out_file.write(str(line))
+    out_file.close()
+
+def check_num_tokens(opcode_token_list, min_tokens, max_tokens):
+    num_tokens = len(opcode_token_list)
+    opcode = opcode_token_list[0]
+    if len(opcode_token_list) < min_tokens or len(opcode_token_list) > max_tokens:
+        # Check if there is only one token
+        if min_tokens == max_tokens:
+            message = "Wrong number of arguments for instruction " + \
+                      "%s:  expected %d, found %d." % \
+                      (opcode, min_tokens, num_tokens)
+        # If there were two different sizes
+        else:
+            message = "Wrong number of arguments for instruction " + \
+                      "%s:  expected between %d and %d, found %d." % \
+                      (opcode, min_tokens, max_tokens, num_tokens)
+        raise ValueError(message)
+    
+
+
+
+################################################################################
+# Start of script.  Simply initializes command line arguments and calls main().
+################################################################################
+
+if __name__ == "__main__":
+
+    # Start by parsing the command line arguments.
+
+    parser = argparse.ArgumentParser(
+            description='Generates binary, VHDL, and other useful output from an input neighborhood processor assembly file.')
+
+    parser.add_argument(
+        'infile',
+        metavar='infile',
+        help='Path to the input assembly file.')
+       
+    parser.add_argument(
+        '-a', '--ascii',
+        action='store_true',
+        help='Save an ascii file of the binary program instructions.')
+      
+    parser.add_argument(
+        '-b', '--bin',
+        action='store_true',
+        help='Save a binary file containing the program instructions.')
+ 
+    parser.add_argument(
+        '-l', '--list',
+        action='store_true',
+        help='Save a listing file containing the original assembly, instruction, and memory location in one document.')
+           
+    parser.add_argument(
+        '-n', '--name',
+        metavar='name',
+        help='Specify a filename for the output files.  Defaults to the input filename.')
+      
+    parser.add_argument(
+        '-o', '--out',
+        metavar='outdir',
+        default='./',
+        help='Specify path to store the output files in.  Defaults to the working directory.')
+                                             
+    parser.add_argument(
+        '-p', '--pre',
+        action='store_true',
+        help='Save the output of the preprocessor after #define statements are populated and numeric arguments are converted.')
+      
+    parser.add_argument(
+        '-r', '--rtl',
+        action='store_true',
+        help='Save a VHDL file with a ROM containing the program instructions.')
+                       
+    parser.add_argument(
+        '-v', '--verbose',
+        action='count',
+        dest='verbose_level', 
+        default=0,
+        help='The amount of output to display in the terminal.  Defaults to no output, and increases with additional -v, e.g. -vvvvv.')
+
+    args = parser.parse_args()
+            
+    # Save the time the script was started.
+
+    current_time = datetime.datetime.now()
+        
+    # Set up the output directory and filenames.
+
+    if args.out == '.' or args.out == '..':
+        output_path = args.out + "/"    # Takes care of . and .. directories.
+    else:
+        output_path = args.out + "/"
+
+    re_result = re.search(r"[\\/]?([\w_-]+)\.", args.infile)
+    if args.name:
+        base_file_name = args.name
+    elif re_result != None:
+        base_file_name = re_result.group(1)
+    else:
+        print "Filename not recognized:  Using default name \"npasm_out\""
+        base_file_name = "npasm_out"
+       
+    main()

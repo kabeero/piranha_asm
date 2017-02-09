@@ -1,0 +1,643 @@
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | ; median3.asm
+  0 000h |                         | ;
+  0 000h |                         | ; Applies a 3x3 median filter over the entire image.  This removes fine lines
+  0 000h |                         | ; and reduces speckle.  Currently edge-cases are not handled any different than
+  0 000h |                         | ; the rest of the image.
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | 
+  0 000h |                         | ; Define new instruction labels to make the code intuitive to read.
+  0 000h |                         | 
+  0 000h |                         | #define PXL_ROW_MASK        00111000b   ; The row bits for pixels
+  0 000h |                         | #define PXL_COL_MASK        00000111b   ; The column bits for pixels
+  0 000h |                         | 
+  0 000h |                         | #define PXL_EDGE_N          00000000b   ; Matches pixels on N edge of NP
+  0 000h |                         | #define PXL_EDGE_S          00111000b   ; Matches pixels on S edge of NP
+  0 000h |                         | #define PXL_EDGE_W          00000000b   ; Matches pixels on W edge of NP
+  0 000h |                         | #define PXL_EDGE_E          00000111b   ; Matches pixels on E edge of NP
+  0 000h |                         |  
+  0 000h |                         | #define START_OF_X          00000000b   ; Starting address of X RAM.
+  0 000h |                         | #define START_OF_Y          01000000b   ; Starting address of Y RAM.
+  0 000h |                         | #define START_OF_Z          10000000b   ; Starting address of X RAM.
+  0 000h |                         | #define START_OF_V          11000000b   ; Starting address of V RAM.
+  0 000h |                         |  
+  0 000h |                         | #define TRUE                 1          ; True pattern
+  0 000h |                         | #define FALSE                0          ; False pattern
+  0 000h |                         | #define NULL                -1          ; Null pattern
+  0 000h |                         | 
+  0 000h |                         | #define NUM_PIXELS          64          ; The number of pixels in the NP.
+  0 000h |                         | #define MASK_AF 01000000b               ; Mask for ADC active flag
+  0 000h |                         | #define BZ      BEQ                     ; Alias branch if zero to branch if equal
+  0 000h |                         | #define BNZ     BNE                     ; Alias branch if not zero to branch if not equal
+  0 000h |                         | 
+  0 000h |                         | ; Algorithm variables.
+  0 000h |                         | 
+  0 000h |                         | #define index               r0          ; The center pixel being evaluated
+  0 000h |                         | #define pxl_row             r2          ; The center pixel being evaluated
+  0 000h |                         | #define pxl_col             r3          ; The center pixel being evaluated
+  0 000h |                         | 
+  0 000h |                         | ; Algorithm constants.
+  0 000h |                         | 
+  0 000h |                         | ; Macros
+  0 000h |                         | 
+  0 000h |                         | ; Sorts two entries in the kernel
+  0 000h |                         | ;#macro sort2 (a, b)
+  0 000h |                         | ;    LDR r0, z[$a]
+  0 000h |                         | ;    LDR r1, z[$b]
+  0 000h |                         | ;    CMP r0, r1
+  0 000h |                         | ;    ZLS
+  0 000h |                         | ;        STR r1, z[$a]
+  0 000h |                         | ;        STR r0, z[$b]
+  0 000h |                         | ;    WAK
+  0 000h |                         | ;#endmacro
+  0 000h |                         |        
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | 
+  0 000h |                         |  
+  0 000h |                         | START:
+  0 000h |                         |  
+  0 000h |                         | CLEAN_SLATE_INIT:
+  0 000h |                         |  
+  0 000h | 4100h 0100000100000000b |     LDR     r0, 0           ; Overwrite x ram with constant (note this is in gray code)
+  1 001h | 4500h 0100010100000000b |     LDR     r2, 00h      
+  2 002h | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address
+  3 003h | 0340h 0000001101000000b |     ADD     r1, 64      
+  4 004h |                         | 
+  4 004h |                         | CLEAN_SLATE_LOOP:
+  4 004h |                         | 
+  4 004h | 4CF0h 0100110011110000b |     STR     r2, [r0]
+  5 005h | 0101h 0000000100000001b |     ADD     r0, 1
+  6 006h | 38D1h 0011100011010001b |     CMP     r0, r1
+  7 007h | C041h 1100000001000001b |     BNE     CLEAN_SLATE_LOOP
+  8 008h |                         |  
+  8 008h |                         | ACQUIRE_IMAGE:
+  8 008h |                         | 
+  8 008h | 8220h 1000001000100000b |     IMG                     ; Acquire a new image from the ADCs
+  9 009h |                         | 
+  9 009h |                         | WAIT_FOR_ADC:
+  9 009h |                         | 
+  9 009h |                         |     ; At this point, the FSM for the ADC is running.  Read the status register
+  9 009h |                         |     ; to check if the conversion is finished. (Note: very inefficient)
+  9 009h |                         | 
+  9 009h | 40F4h 0100000011110100b |     LDR     r0, SR          ; Load the status register
+ 10 00Ah | 2140h 0010000101000000b |     AND     r0, MASK_AF     ; Check if the ADC is active
+ 11 00Bh | C091h 1100000010010001b |     BNZ     WAIT_FOR_ADC    ; Loop while the ADC is converting
+ 12 00Ch |                         |  
+ 12 00Ch |                         | AI_CONVERT_TO_BINARY:
+ 12 00Ch |                         |     
+ 12 00Ch | 4100h 0100000100000000b |     LDR     r0, START_OF_X  ; Start of image
+ 13 00Dh | 42D0h 0100001011010000b |     LDR     r1, r0
+ 14 00Eh | 0340h 0000001101000000b |     ADD     r1, NUM_PIXELS  ; End of image
+ 15 00Fh |                         | 
+ 15 00Fh |                         | AI_CTB_LOOP:
+ 15 00Fh |                         | 
+ 15 00Fh | 44F0h 0100010011110000b |     LDR     r2, [r0]    ; Convert gray to binary code
+ 16 010h | 8C20h 1000110000100000b |     GTB     r2
+ 17 011h | 4CF0h 0100110011110000b |     STR     r2, [r0]
+ 18 012h | 0101h 0000000100000001b |     ADD     r0, 1
+ 19 013h | 38D1h 0011100011010001b |     CMP     r0, r1
+ 20 014h | C0F1h 1100000011110001b |     BNE     AI_CTB_LOOP
+ 21 015h |                         | 
+ 21 015h |                         | OUTPUT_ORIGINAL_IMAGE:
+ 21 015h |                         | 
+ 21 015h | 4100h 0100000100000000b |     LDR     r0, START_OF_X
+ 22 016h | F5C0h 1111010111000000b |     BL      Output_Data_Block   ; Output the image
+ 23 017h |                         | 
+ 23 017h |                         | ;-------------------------------------------------------------------------------
+ 23 017h |                         | 
+ 23 017h |                         | MEDIAN3:
+ 23 017h |                         | 
+ 23 017h |                         | M3_INIT:
+ 23 017h |                         | 
+ 23 017h | 4100h 0100000100000000b |     LDR     index, 0                   ; Start with the upper-left pixel
+ 24 018h |                         | 
+ 24 018h |                         | M3_LOOP:
+ 24 018h |                         | 
+ 24 018h |                         |     ; Save variables for the row and column number of the current pixel index.
+ 24 018h |                         | 
+ 24 018h | 44D0h 0100010011010000b |     LDR     pxl_row, index
+ 25 019h | 2538h 0010010100111000b |     AND     pxl_row, PXL_ROW_MASK
+ 26 01Ah | 46D0h 0100011011010000b |     LDR     pxl_col, index
+ 27 01Bh | 2707h 0010011100000111b |     AND     pxl_col, PXL_COL_MASK
+ 28 01Ch |                         | 
+ 28 01Ch |                         | LOAD_KERNEL:
+ 28 01Ch |                         | 
+ 28 01Ch |                         |     ; Copy the kernel values into a separate memory location to prevent the
+ 28 01Ch |                         |     ; image from being corrupted and to give prepare them for the median 
+ 28 01Ch |                         |     ; search algorithm, which expects them to be in a specific location.
+ 28 01Ch |                         | 
+ 28 01Ch |                         | ;-------------------------------------------------------------------------------
+ 28 01Ch |                         | 
+ 28 01Ch |                         | LOAD_KERNEL_CENTER:
+ 28 01Ch |                         | 
+ 28 01Ch |                         |     ; First copy the center pixel from x[index], to z[4].  Unlike the edge
+ 28 01Ch |                         |     ; pixels, this one is always located in the local NP.
+ 28 01Ch |                         | 
+ 28 01Ch | 42F0h 0100001011110000b |     LDR     r1, [index]
+ 29 01Dh | 4A84h 0100101010000100b |     STR     r1, z[4]
+ 30 01Eh |                         | 
+ 30 01Eh |                         | ;-------------------------------------------------------------------------------
+ 30 01Eh |                         | 
+ 30 01Eh |                         | LOAD_KERNEL_NW:
+ 30 01Eh |                         | 
+ 30 01Eh |                         | LOAD_KERNEL_NW_CHECK_IF_NW_CORNER:
+ 30 01Eh |                         | 
+ 30 01Eh | 3900h 0011100100000000b |     CMP     index, {PXL_EDGE_N + PXL_EDGE_W}
+ 31 01Fh | C251h 1100001001010001b |     BNE     LOAD_KERNEL_NW_CHECK_IF_N_EDGE
+ 32 020h | 423Fh 0100001000111111b |     LDR     r1, x[63]       ; This is the SE pixel to be sent to the SE NP
+ 33 021h | 42E1h 0100001011100001b |     LDR     r1, N           ; Move from NW NP to W NP
+ 34 022h | 42E4h 0100001011100100b |     LDR     r1, W           ; Move from W NP to local NP
+ 35 023h | 4A80h 0100101010000000b |     STR     r1, z[0]
+ 36 024h | C3AFh 1100001110101111b |     B       LOAD_KERNEL_N
+ 37 025h |                         |                                           
+ 37 025h |                         | LOAD_KERNEL_NW_CHECK_IF_N_EDGE:
+ 37 025h |                         | 
+ 37 025h | 3D00h 0011110100000000b |     CMP     pxl_row, PXL_EDGE_N
+ 38 026h | C2D1h 1100001011010001b |     BNE     LOAD_KERNEL_NW_CHECK_IF_W_EDGE
+ 39 027h | 0137h 0000000100110111b |     ADD     index, 55       ; Get the NW pixel for the NP to the S.
+ 40 028h | 42F0h 0100001011110000b |     LDR     r1, [index]
+ 41 029h | 42E1h 0100001011100001b |     LDR     r1, N
+ 42 02Ah | 4A80h 0100101010000000b |     STR     r1, z[0]
+ 43 02Bh | 1137h 0001000100110111b |     SUB     index, 55       ; Return to center
+ 44 02Ch | C3AFh 1100001110101111b |     B       LOAD_KERNEL_N
+ 45 02Dh |                         |                                           
+ 45 02Dh |                         | LOAD_KERNEL_NW_CHECK_IF_W_EDGE:
+ 45 02Dh |                         | 
+ 45 02Dh | 3F00h 0011111100000000b |     CMP     pxl_col, PXL_EDGE_W
+ 46 02Eh | C351h 1100001101010001b |     BNE     LOAD_KERNEL_NW_IS_IN_INTERIOR
+ 47 02Fh | 1101h 0001000100000001b |     SUB     index, 1        ; Get the NW pixel for the NP to the E.
+ 48 030h | 42F0h 0100001011110000b |     LDR     r1, [index]
+ 49 031h | 42E4h 0100001011100100b |     LDR     r1, W
+ 50 032h | 4A80h 0100101010000000b |     STR     r1, z[0]
+ 51 033h | 0101h 0000000100000001b |     ADD     index, 1        ; Return to center
+ 52 034h | C3AFh 1100001110101111b |     B       LOAD_KERNEL_N
+ 53 035h |                         |      
+ 53 035h |                         | LOAD_KERNEL_NW_IS_IN_INTERIOR:
+ 53 035h |                         | 
+ 53 035h | 1109h 0001000100001001b |     SUB     index, 9        ; This moves to the pixel NW of index
+ 54 036h | 42F0h 0100001011110000b |     LDR     r1, [index]
+ 55 037h | 4A80h 0100101010000000b |     STR     r1, z[0]
+ 56 038h | 0109h 0000000100001001b |     ADD     index, 9        ; return to center
+ 57 039h | C3AFh 1100001110101111b |     B       LOAD_KERNEL_N
+ 58 03Ah |                         | 
+ 58 03Ah |                         | ;-------------------------------------------------------------------------------
+ 58 03Ah |                         | 
+ 58 03Ah |                         | LOAD_KERNEL_N:
+ 58 03Ah |                         | 
+ 58 03Ah |                         | LOAD_KERNEL_N_CHECK_IF_N_EDGE:
+ 58 03Ah |                         |                               
+ 58 03Ah | 3D00h 0011110100000000b |     CMP     pxl_row, PXL_EDGE_N
+ 59 03Bh | C421h 1100010000100001b |     BNE     LOAD_KERNEL_N_IS_IN_INTERIOR
+ 60 03Ch | 0138h 0000000100111000b |     ADD     index, 56       ; Get the N pixel for the NP to the S.
+ 61 03Dh | 42F0h 0100001011110000b |     LDR     r1, [index]
+ 62 03Eh | 42E1h 0100001011100001b |     LDR     r1, N
+ 63 03Fh | 4A81h 0100101010000001b |     STR     r1, z[1]
+ 64 040h | 1138h 0001000100111000b |     SUB     index, 56       ; Return to center
+ 65 041h | C47Fh 1100010001111111b |     B       LOAD_KERNEL_NE
+ 66 042h |                         |                           
+ 66 042h |                         | LOAD_KERNEL_N_IS_IN_INTERIOR:
+ 66 042h |                         | 
+ 66 042h | 1108h 0001000100001000b |     SUB     index, 8        ; This moves to the pixel N of index
+ 67 043h | 42F0h 0100001011110000b |     LDR     r1, [index]
+ 68 044h | 4A81h 0100101010000001b |     STR     r1, z[1]
+ 69 045h | 0108h 0000000100001000b |     ADD     index, 8        ; return to center
+ 70 046h | C47Fh 1100010001111111b |     B       LOAD_KERNEL_NE
+ 71 047h |                         |                               
+ 71 047h |                         | ;-------------------------------------------------------------------------------
+ 71 047h |                         | 
+ 71 047h |                         | LOAD_KERNEL_NE:
+ 71 047h |                         | 
+ 71 047h |                         | LOAD_KERNEL_NE_CHECK_IF_NE_CORNER:
+ 71 047h |                         | 
+ 71 047h | 3907h 0011100100000111b |     CMP     index, {PXL_EDGE_N + PXL_EDGE_E}
+ 72 048h | C4E1h 1100010011100001b |     BNE     LOAD_KERNEL_NE_CHECK_IF_N_EDGE
+ 73 049h | 4238h 0100001000111000b |     LDR     r1, x[56]       ; This is the SE pixel to be sent to the SE NP
+ 74 04Ah | 42E1h 0100001011100001b |     LDR     r1, N           ; Move from NE NP to E NP
+ 75 04Bh | 42E8h 0100001011101000b |     LDR     r1, E           ; Move from E NP to local NP
+ 76 04Ch | 4A82h 0100101010000010b |     STR     r1, z[2]
+ 77 04Dh | C63Fh 1100011000111111b |     B       LOAD_KERNEL_E
+ 78 04Eh |                         |                     
+ 78 04Eh |                         | LOAD_KERNEL_NE_CHECK_IF_N_EDGE:
+ 78 04Eh |                         | 
+ 78 04Eh | 3D00h 0011110100000000b |     CMP     pxl_row, PXL_EDGE_N
+ 79 04Fh | C561h 1100010101100001b |     BNE     LOAD_KERNEL_NE_CHECK_IF_E_EDGE
+ 80 050h | 0139h 0000000100111001b |     ADD     index, 57       ; Get the NE pixel for the NP to the S.
+ 81 051h | 42F0h 0100001011110000b |     LDR     r1, [index]
+ 82 052h | 42E1h 0100001011100001b |     LDR     r1, N
+ 83 053h | 4A82h 0100101010000010b |     STR     r1, z[2]
+ 84 054h | 1139h 0001000100111001b |     SUB     index, 57       ; Return to center
+ 85 055h | C63Fh 1100011000111111b |     B       LOAD_KERNEL_E
+ 86 056h |                         |                     
+ 86 056h |                         | LOAD_KERNEL_NE_CHECK_IF_E_EDGE:
+ 86 056h |                         | 
+ 86 056h | 3F07h 0011111100000111b |     CMP     pxl_col, PXL_EDGE_E
+ 87 057h | C5E1h 1100010111100001b |     BNE     LOAD_KERNEL_NE_IS_IN_INTERIOR
+ 88 058h | 110Fh 0001000100001111b |     SUB     index, 15       ; Get the NE pixel for the NP to the W.
+ 89 059h | 42F0h 0100001011110000b |     LDR     r1, [index]
+ 90 05Ah | 42E8h 0100001011101000b |     LDR     r1, E
+ 91 05Bh | 4A82h 0100101010000010b |     STR     r1, z[2]
+ 92 05Ch | 010Fh 0000000100001111b |     ADD     index, 15       ; Return to center
+ 93 05Dh | C63Fh 1100011000111111b |     B       LOAD_KERNEL_E
+ 94 05Eh |                         |      
+ 94 05Eh |                         | LOAD_KERNEL_NE_IS_IN_INTERIOR:
+ 94 05Eh |                         | 
+ 94 05Eh | 1107h 0001000100000111b |     SUB     index, 7        ; This moves to the pixel NE of index
+ 95 05Fh | 42F0h 0100001011110000b |     LDR     r1, [index]
+ 96 060h | 4A82h 0100101010000010b |     STR     r1, z[2]
+ 97 061h | 0107h 0000000100000111b |     ADD     index, 7        ; return to center
+ 98 062h | C63Fh 1100011000111111b |     B       LOAD_KERNEL_E
+ 99 063h |                         |              
+ 99 063h |                         | ;-------------------------------------------------------------------------------
+ 99 063h |                         | 
+ 99 063h |                         | LOAD_KERNEL_E:
+ 99 063h |                         | 
+ 99 063h |                         | LOAD_KERNEL_E_CHECK_IF_E_EDGE:
+ 99 063h |                         |                               
+ 99 063h | 3F07h 0011111100000111b |     CMP     pxl_col, PXL_EDGE_E
+100 064h | C6B1h 1100011010110001b |     BNE     LOAD_KERNEL_E_IS_IN_INTERIOR
+101 065h | 1107h 0001000100000111b |     SUB     index, 7        ; Get the E pixel for the NP to the W.
+102 066h | 42F0h 0100001011110000b |     LDR     r1, [index]
+103 067h | 42E8h 0100001011101000b |     LDR     r1, E
+104 068h | 4A85h 0100101010000101b |     STR     r1, z[5]
+105 069h | 0107h 0000000100000111b |     ADD     index, 7        ; Return to center
+106 06Ah | C70Fh 1100011100001111b |     B       LOAD_KERNEL_SE
+107 06Bh |                         |                           
+107 06Bh |                         | LOAD_KERNEL_E_IS_IN_INTERIOR:
+107 06Bh |                         | 
+107 06Bh | 0101h 0000000100000001b |     ADD     index, 1        ; This moves to the pixel E of index
+108 06Ch | 42F0h 0100001011110000b |     LDR     r1, [index]
+109 06Dh | 4A85h 0100101010000101b |     STR     r1, z[5]
+110 06Eh | 1101h 0001000100000001b |     SUB     index, 1        ; return to center
+111 06Fh | C70Fh 1100011100001111b |     B       LOAD_KERNEL_SE
+112 070h |                         |                          
+112 070h |                         | ;-------------------------------------------------------------------------------
+112 070h |                         | 
+112 070h |                         | LOAD_KERNEL_SE:
+112 070h |                         | 
+112 070h |                         | LOAD_KERNEL_SE_CHECK_IF_SE_CORNER:
+112 070h |                         | 
+112 070h | 393Fh 0011100100111111b |     CMP     index, {PXL_EDGE_S + PXL_EDGE_E}
+113 071h | C771h 1100011101110001b |     BNE     LOAD_KERNEL_SE_CHECK_IF_S_EDGE
+114 072h | 4200h 0100001000000000b |     LDR     r1, x[0]        ; This is the SE pixel for the NW NP
+115 073h | 42E2h 0100001011100010b |     LDR     r1, S           ; Move from SE NP to E NP
+116 074h | 42E8h 0100001011101000b |     LDR     r1, E           ; Move from E NP to local NP
+117 075h | 4A88h 0100101010001000b |     STR     r1, z[8]
+118 076h | C8CFh 1100100011001111b |     B       LOAD_KERNEL_S
+119 077h |                         | 
+119 077h |                         | LOAD_KERNEL_SE_CHECK_IF_S_EDGE:
+119 077h |                         | 
+119 077h | 3D38h 0011110100111000b |     CMP     pxl_row, PXL_EDGE_S
+120 078h | C7F1h 1100011111110001b |     BNE     LOAD_KERNEL_SE_CHECK_IF_E_EDGE
+121 079h | 1137h 0001000100110111b |     SUB     index, 55       ; Get the SE pixel for the NP to the N.
+122 07Ah | 42F0h 0100001011110000b |     LDR     r1, [index]
+123 07Bh | 42E2h 0100001011100010b |     LDR     r1, S
+124 07Ch | 4A88h 0100101010001000b |     STR     r1, z[8]
+125 07Dh | 0137h 0000000100110111b |     ADD     index, 55       ; Return to center
+126 07Eh | C8CFh 1100100011001111b |     B       LOAD_KERNEL_S
+127 07Fh |                         |                  
+127 07Fh |                         | LOAD_KERNEL_SE_CHECK_IF_E_EDGE:
+127 07Fh |                         | 
+127 07Fh | 3F07h 0011111100000111b |     CMP     pxl_col, PXL_EDGE_E
+128 080h | C871h 1100100001110001b |     BNE     LOAD_KERNEL_SE_IS_IN_INTERIOR
+129 081h | 0101h 0000000100000001b |     ADD     index, 1        ; Get the SE pixel for the NP to the W.
+130 082h | 42F0h 0100001011110000b |     LDR     r1, [index]
+131 083h | 42E8h 0100001011101000b |     LDR     r1, E
+132 084h | 4A88h 0100101010001000b |     STR     r1, z[8]
+133 085h | 1101h 0001000100000001b |     SUB     index, 1        ; Return to center
+134 086h | C8CFh 1100100011001111b |     B       LOAD_KERNEL_S
+135 087h |                         |                  
+135 087h |                         | LOAD_KERNEL_SE_IS_IN_INTERIOR:
+135 087h |                         | 
+135 087h | 0109h 0000000100001001b |     ADD     index, 9        ; This moves to the pixel SE of index
+136 088h | 42F0h 0100001011110000b |     LDR     r1, [index]
+137 089h | 4A88h 0100101010001000b |     STR     r1, z[8]
+138 08Ah | 1109h 0001000100001001b |     SUB     index, 9        ; return to center
+139 08Bh | C8CFh 1100100011001111b |     B       LOAD_KERNEL_S
+140 08Ch |                         |      
+140 08Ch |                         | ;-------------------------------------------------------------------------------
+140 08Ch |                         | 
+140 08Ch |                         | LOAD_KERNEL_S:
+140 08Ch |                         | 
+140 08Ch |                         | LOAD_KERNEL_S_CHECK_IF_S_EDGE:
+140 08Ch |                         |                               
+140 08Ch | 3D38h 0011110100111000b |     CMP     pxl_row, PXL_EDGE_S
+141 08Dh | C941h 1100100101000001b |     BNE     LOAD_KERNEL_S_IS_IN_INTERIOR
+142 08Eh | 1138h 0001000100111000b |     SUB     index, 56       ; Get the S pixel for the NP to the N.
+143 08Fh | 42F0h 0100001011110000b |     LDR     r1, [index]
+144 090h | 42E2h 0100001011100010b |     LDR     r1, S
+145 091h | 4A87h 0100101010000111b |     STR     r1, z[7]
+146 092h | 0138h 0000000100111000b |     ADD     index, 56       ; Return to center
+147 093h | C99Fh 1100100110011111b |     B       LOAD_KERNEL_SW
+148 094h |                         |                           
+148 094h |                         | LOAD_KERNEL_S_IS_IN_INTERIOR:
+148 094h |                         | 
+148 094h | 0108h 0000000100001000b |     ADD     index, 8        ; This moves to the pixel S of index
+149 095h | 42F0h 0100001011110000b |     LDR     r1, [index]
+150 096h | 4A87h 0100101010000111b |     STR     r1, z[7]
+151 097h | 1108h 0001000100001000b |     SUB     index, 8        ; return to center
+152 098h | C99Fh 1100100110011111b |     B       LOAD_KERNEL_SW
+153 099h |                         |                                
+153 099h |                         | ;-------------------------------------------------------------------------------
+153 099h |                         | 
+153 099h |                         | LOAD_KERNEL_SW:
+153 099h |                         | 
+153 099h |                         | LOAD_KERNEL_SW_CHECK_IF_SW_CORNER:
+153 099h |                         | 
+153 099h | 3938h 0011100100111000b |     CMP     index, {PXL_EDGE_S + PXL_EDGE_W}
+154 09Ah | CA01h 1100101000000001b |     BNE     LOAD_KERNEL_SW_CHECK_IF_S_EDGE
+155 09Bh | 4207h 0100001000000111b |     LDR     r1, x[7]        ; This is the SW pixel to be sent to the NE NP
+156 09Ch | 42E2h 0100001011100010b |     LDR     r1, S           ; Move from SW NP to W NP
+157 09Dh | 42E4h 0100001011100100b |     LDR     r1, W           ; Move from W NP to local NP
+158 09Eh | 4A86h 0100101010000110b |     STR     r1, z[6]
+159 09Fh | CB5Fh 1100101101011111b |     B       LOAD_KERNEL_W
+160 0A0h |                         |                  
+160 0A0h |                         | LOAD_KERNEL_SW_CHECK_IF_S_EDGE:
+160 0A0h |                         | 
+160 0A0h | 3D38h 0011110100111000b |     CMP     pxl_row, PXL_EDGE_S
+161 0A1h | CA81h 1100101010000001b |     BNE     LOAD_KERNEL_SW_CHECK_IF_W_EDGE
+162 0A2h | 1139h 0001000100111001b |     SUB     index, 57       ; Get the SW pixel for the NP to the N.
+163 0A3h | 42F0h 0100001011110000b |     LDR     r1, [index]
+164 0A4h | 42E2h 0100001011100010b |     LDR     r1, S
+165 0A5h | 4A86h 0100101010000110b |     STR     r1, z[6]
+166 0A6h | 0139h 0000000100111001b |     ADD     index, 57       ; Return to center
+167 0A7h | CB5Fh 1100101101011111b |     B       LOAD_KERNEL_W
+168 0A8h |                         |                  
+168 0A8h |                         | LOAD_KERNEL_SW_CHECK_IF_W_EDGE:
+168 0A8h |                         | 
+168 0A8h | 3F00h 0011111100000000b |     CMP     pxl_col, PXL_EDGE_W
+169 0A9h | CB01h 1100101100000001b |     BNE     LOAD_KERNEL_SW_IS_IN_INTERIOR
+170 0AAh | 010Fh 0000000100001111b |     ADD     index, 15       ; Get the SW pixel for the NP to the E.
+171 0ABh | 42F0h 0100001011110000b |     LDR     r1, [index]
+172 0ACh | 42E4h 0100001011100100b |     LDR     r1, W
+173 0ADh | 4A86h 0100101010000110b |     STR     r1, z[6]
+174 0AEh | 110Fh 0001000100001111b |     SUB     index, 15       ; Return to center
+175 0AFh | CB5Fh 1100101101011111b |     B       LOAD_KERNEL_W
+176 0B0h |                         |      
+176 0B0h |                         | LOAD_KERNEL_SW_IS_IN_INTERIOR:
+176 0B0h |                         | 
+176 0B0h | 0107h 0000000100000111b |     ADD     index, 7        ; This moves to the pixel SW of index
+177 0B1h | 42F0h 0100001011110000b |     LDR     r1, [index]
+178 0B2h | 4A86h 0100101010000110b |     STR     r1, z[6]
+179 0B3h | 1107h 0001000100000111b |     SUB     index, 7        ; return to center
+180 0B4h | CB5Fh 1100101101011111b |     B       LOAD_KERNEL_W
+181 0B5h |                         |      
+181 0B5h |                         | ;-------------------------------------------------------------------------------
+181 0B5h |                         | 
+181 0B5h |                         | LOAD_KERNEL_W:
+181 0B5h |                         | 
+181 0B5h |                         | LOAD_KERNEL_W_CHECK_IF_W_EDGE:
+181 0B5h |                         |                               
+181 0B5h | 3F00h 0011111100000000b |     CMP     pxl_col, PXL_EDGE_W
+182 0B6h | CBD1h 1100101111010001b |     BNE     LOAD_KERNEL_W_IS_IN_INTERIOR
+183 0B7h | 0107h 0000000100000111b |     ADD     index, 7        ; Get the W pixel for the NP to the E.
+184 0B8h | 42F0h 0100001011110000b |     LDR     r1, [index]
+185 0B9h | 42E4h 0100001011100100b |     LDR     r1, W
+186 0BAh | 4A83h 0100101010000011b |     STR     r1, z[3]
+187 0BBh | 1107h 0001000100000111b |     SUB     index, 7        ; Return to center
+188 0BCh | CC2Fh 1100110000101111b |     B       FIND_MEDIAN
+189 0BDh |                         |                           
+189 0BDh |                         | LOAD_KERNEL_W_IS_IN_INTERIOR:
+189 0BDh |                         | 
+189 0BDh | 1101h 0001000100000001b |     SUB     index, 1        ; This moves to the pixel W of index
+190 0BEh | 42F0h 0100001011110000b |     LDR     r1, [index]
+191 0BFh | 4A83h 0100101010000011b |     STR     r1, z[3]
+192 0C0h | 0101h 0000000100000001b |     ADD     index, 1        ; return to center
+193 0C1h | CC2Fh 1100110000101111b |     B       FIND_MEDIAN
+194 0C2h |                         | 
+194 0C2h |                         | ;-------------------------------------------------------------------------------
+194 0C2h |                         | 
+194 0C2h |                         | FIND_MEDIAN:
+194 0C2h |                         | 
+194 0C2h | 46D0h 0100011011010000b |     LDR     r3, index           ; Find the index in the resulting filtered image
+195 0C3h | 0740h 0000011101000000b |     ADD     r3, START_OF_Y
+196 0C4h | ECE0h 1110110011100000b |     BL      Find_Kernel_Median  ; Compute the median value, return in r0
+197 0C5h | 48F3h 0100100011110011b |     STR     r0, [r3]            ; Store the median in Y memory
+198 0C6h | 1740h 0001011101000000b |     SUB     r3, START_OF_Y      ; Restore the index
+199 0C7h | 40D3h 0100000011010011b |     LDR     index, r3
+200 0C8h |                         | 
+200 0C8h |                         | CHECK_LOOP_CONDITION:
+200 0C8h |                         | 
+200 0C8h | 0101h 0000000100000001b |     ADD     index, 1
+201 0C9h | 3940h 0011100101000000b |     CMP     index, NUM_PIXELS
+202 0CAh | C18Bh 1100000110001011b |     BLT     M3_LOOP
+203 0CBh |                         |     
+203 0CBh |                         | M3_LOOP_END:
+203 0CBh |                         | 
+203 0CBh | 4140h 0100000101000000b |     LDR     r0, START_OF_Y
+204 0CCh | F5C0h 1111010111000000b |     BL      Output_Data_Block   ; Output the image
+205 0CDh | C00Fh 1100000000001111b |     B       START               ; Infinite loop
+206 0CEh |                         |                                               
+206 0CEh |                         | 
+206 0CEh |                         | 
+206 0CEh |                         | ;-------------------------------------------------------------------------------                                        
+206 0CEh |                         | ; Find the median of a 3x3 kernel.  The 9 input values are assumed to be in
+206 0CEh |                         | ; z[0]..z[8] and the median value is returned in r0.  This code follows a macro
+206 0CEh |                         | ; obtained from http://ndevilla.free.fr/median/median/src/optmed.c and verified
+206 0CEh |                         | ; in python.
+206 0CEh |                         | ;
+206 0CEh |                         | ; Inputs:
+206 0CEh |                         | ;
+206 0CEh |                         | ;   z[0..8]     A vector of 9 values of which to find the median.
+206 0CEh |                         | ;
+206 0CEh |                         | ; Outputs:
+206 0CEh |                         | ;
+206 0CEh |                         | ;   r0          Median value
+206 0CEh |                         | ; 
+206 0CEh |                         | ; Registers Modified:
+206 0CEh |                         | ;
+206 0CEh |                         | ;   r0, r1
+206 0CEh |                         | ;-------------------------------------------------------------------------------                                        
+206 0CEh |                         | 
+206 0CEh |                         | Find_Kernel_Median:
+206 0CEh |                         | 
+206 0CEh |                         |     ; Use macros to perform the sorting to avoid wasting cycles with BL/BX.
+206 0CEh |                         |     ; The median value ends up in z[4], which is return in r0.
+206 0CEh |                         | 
+206 0CEh | 4081h 0100000010000001b |     LDR r0, z[1]
+207 0CFh | 4282h 0100001010000010b |     LDR r1, z[2]
+208 0D0h | 38D1h 0011100011010001b |     CMP r0, r1
+209 0D1h | 9009h 1001000000001001b |     ZLS
+210 0D2h | 4A81h 0100101010000001b |         STR r1, z[1]
+211 0D3h | 4882h 0100100010000010b |         STR r0, z[2]
+212 0D4h | 8240h 1000001001000000b |     WAK
+213 0D5h | 4081h 0100000010000001b |     LDR r0, z[1]
+214 0D6h | 4282h 0100001010000010b |     LDR r1, z[2]
+215 0D7h | 38D1h 0011100011010001b |     CMP r0, r1
+216 0D8h | 9009h 1001000000001001b |     ZLS
+217 0D9h | 4A81h 0100101010000001b |         STR r1, z[1]
+218 0DAh | 4882h 0100100010000010b |         STR r0, z[2]
+219 0DBh | 8240h 1000001001000000b |     WAK
+220 0DCh | 4084h 0100000010000100b |     LDR r0, z[4]
+221 0DDh | 4285h 0100001010000101b |     LDR r1, z[5]
+222 0DEh | 38D1h 0011100011010001b |     CMP r0, r1
+223 0DFh | 9009h 1001000000001001b |     ZLS
+224 0E0h | 4A84h 0100101010000100b |         STR r1, z[4]
+225 0E1h | 4885h 0100100010000101b |         STR r0, z[5]
+226 0E2h | 8240h 1000001001000000b |     WAK
+227 0E3h | 4087h 0100000010000111b |     LDR r0, z[7]
+228 0E4h | 4288h 0100001010001000b |     LDR r1, z[8]
+229 0E5h | 38D1h 0011100011010001b |     CMP r0, r1
+230 0E6h | 9009h 1001000000001001b |     ZLS
+231 0E7h | 4A87h 0100101010000111b |         STR r1, z[7]
+232 0E8h | 4888h 0100100010001000b |         STR r0, z[8]
+233 0E9h | 8240h 1000001001000000b |     WAK
+234 0EAh | 4080h 0100000010000000b |     LDR r0, z[0]
+235 0EBh | 4281h 0100001010000001b |     LDR r1, z[1]
+236 0ECh | 38D1h 0011100011010001b |     CMP r0, r1
+237 0EDh | 9009h 1001000000001001b |     ZLS
+238 0EEh | 4A80h 0100101010000000b |         STR r1, z[0]
+239 0EFh | 4881h 0100100010000001b |         STR r0, z[1]
+240 0F0h | 8240h 1000001001000000b |     WAK
+241 0F1h | 4083h 0100000010000011b |     LDR r0, z[3]
+242 0F2h | 4284h 0100001010000100b |     LDR r1, z[4]
+243 0F3h | 38D1h 0011100011010001b |     CMP r0, r1
+244 0F4h | 9009h 1001000000001001b |     ZLS
+245 0F5h | 4A83h 0100101010000011b |         STR r1, z[3]
+246 0F6h | 4884h 0100100010000100b |         STR r0, z[4]
+247 0F7h | 8240h 1000001001000000b |     WAK
+248 0F8h | 4086h 0100000010000110b |     LDR r0, z[6]
+249 0F9h | 4287h 0100001010000111b |     LDR r1, z[7]
+250 0FAh | 38D1h 0011100011010001b |     CMP r0, r1
+251 0FBh | 9009h 1001000000001001b |     ZLS
+252 0FCh | 4A86h 0100101010000110b |         STR r1, z[6]
+253 0FDh | 4887h 0100100010000111b |         STR r0, z[7]
+254 0FEh | 8240h 1000001001000000b |     WAK
+255 0FFh | 4081h 0100000010000001b |     LDR r0, z[1]
+256 100h | 4282h 0100001010000010b |     LDR r1, z[2]
+257 101h | 38D1h 0011100011010001b |     CMP r0, r1
+258 102h | 9009h 1001000000001001b |     ZLS
+259 103h | 4A81h 0100101010000001b |         STR r1, z[1]
+260 104h | 4882h 0100100010000010b |         STR r0, z[2]
+261 105h | 8240h 1000001001000000b |     WAK
+262 106h | 4084h 0100000010000100b |     LDR r0, z[4]
+263 107h | 4285h 0100001010000101b |     LDR r1, z[5]
+264 108h | 38D1h 0011100011010001b |     CMP r0, r1
+265 109h | 9009h 1001000000001001b |     ZLS
+266 10Ah | 4A84h 0100101010000100b |         STR r1, z[4]
+267 10Bh | 4885h 0100100010000101b |         STR r0, z[5]
+268 10Ch | 8240h 1000001001000000b |     WAK
+269 10Dh | 4087h 0100000010000111b |     LDR r0, z[7]
+270 10Eh | 4288h 0100001010001000b |     LDR r1, z[8]
+271 10Fh | 38D1h 0011100011010001b |     CMP r0, r1
+272 110h | 9009h 1001000000001001b |     ZLS
+273 111h | 4A87h 0100101010000111b |         STR r1, z[7]
+274 112h | 4888h 0100100010001000b |         STR r0, z[8]
+275 113h | 8240h 1000001001000000b |     WAK
+276 114h | 4085h 0100000010000101b |     LDR r0, z[5]
+277 115h | 4288h 0100001010001000b |     LDR r1, z[8]
+278 116h | 38D1h 0011100011010001b |     CMP r0, r1
+279 117h | 9009h 1001000000001001b |     ZLS
+280 118h | 4A85h 0100101010000101b |         STR r1, z[5]
+281 119h | 4888h 0100100010001000b |         STR r0, z[8]
+282 11Ah | 8240h 1000001001000000b |     WAK
+283 11Bh | 4084h 0100000010000100b |     LDR r0, z[4]
+284 11Ch | 4287h 0100001010000111b |     LDR r1, z[7]
+285 11Dh | 38D1h 0011100011010001b |     CMP r0, r1
+286 11Eh | 9009h 1001000000001001b |     ZLS
+287 11Fh | 4A84h 0100101010000100b |         STR r1, z[4]
+288 120h | 4887h 0100100010000111b |         STR r0, z[7]
+289 121h | 8240h 1000001001000000b |     WAK
+290 122h | 4080h 0100000010000000b |     LDR r0, z[0]
+291 123h | 4283h 0100001010000011b |     LDR r1, z[3]
+292 124h | 38D1h 0011100011010001b |     CMP r0, r1
+293 125h | 9009h 1001000000001001b |     ZLS
+294 126h | 4A80h 0100101010000000b |         STR r1, z[0]
+295 127h | 4883h 0100100010000011b |         STR r0, z[3]
+296 128h | 8240h 1000001001000000b |     WAK
+297 129h | 4083h 0100000010000011b |     LDR r0, z[3]
+298 12Ah | 4286h 0100001010000110b |     LDR r1, z[6]
+299 12Bh | 38D1h 0011100011010001b |     CMP r0, r1
+300 12Ch | 9009h 1001000000001001b |     ZLS
+301 12Dh | 4A83h 0100101010000011b |         STR r1, z[3]
+302 12Eh | 4886h 0100100010000110b |         STR r0, z[6]
+303 12Fh | 8240h 1000001001000000b |     WAK
+304 130h | 4082h 0100000010000010b |     LDR r0, z[2]
+305 131h | 4285h 0100001010000101b |     LDR r1, z[5]
+306 132h | 38D1h 0011100011010001b |     CMP r0, r1
+307 133h | 9009h 1001000000001001b |     ZLS
+308 134h | 4A82h 0100101010000010b |         STR r1, z[2]
+309 135h | 4885h 0100100010000101b |         STR r0, z[5]
+310 136h | 8240h 1000001001000000b |     WAK
+311 137h | 4081h 0100000010000001b |     LDR r0, z[1]
+312 138h | 4284h 0100001010000100b |     LDR r1, z[4]
+313 139h | 38D1h 0011100011010001b |     CMP r0, r1
+314 13Ah | 9009h 1001000000001001b |     ZLS
+315 13Bh | 4A81h 0100101010000001b |         STR r1, z[1]
+316 13Ch | 4884h 0100100010000100b |         STR r0, z[4]
+317 13Dh | 8240h 1000001001000000b |     WAK
+318 13Eh | 4084h 0100000010000100b |     LDR r0, z[4]
+319 13Fh | 4287h 0100001010000111b |     LDR r1, z[7]
+320 140h | 38D1h 0011100011010001b |     CMP r0, r1
+321 141h | 9009h 1001000000001001b |     ZLS
+322 142h | 4A84h 0100101010000100b |         STR r1, z[4]
+323 143h | 4887h 0100100010000111b |         STR r0, z[7]
+324 144h | 8240h 1000001001000000b |     WAK
+325 145h | 4084h 0100000010000100b |     LDR r0, z[4]
+326 146h | 4282h 0100001010000010b |     LDR r1, z[2]
+327 147h | 38D1h 0011100011010001b |     CMP r0, r1
+328 148h | 9009h 1001000000001001b |     ZLS
+329 149h | 4A84h 0100101010000100b |         STR r1, z[4]
+330 14Ah | 4882h 0100100010000010b |         STR r0, z[2]
+331 14Bh | 8240h 1000001001000000b |     WAK
+332 14Ch | 4086h 0100000010000110b |     LDR r0, z[6]
+333 14Dh | 4284h 0100001010000100b |     LDR r1, z[4]
+334 14Eh | 38D1h 0011100011010001b |     CMP r0, r1
+335 14Fh | 9009h 1001000000001001b |     ZLS
+336 150h | 4A86h 0100101010000110b |         STR r1, z[6]
+337 151h | 4884h 0100100010000100b |         STR r0, z[4]
+338 152h | 8240h 1000001001000000b |     WAK
+339 153h | 4084h 0100000010000100b |     LDR r0, z[4]
+340 154h | 4282h 0100001010000010b |     LDR r1, z[2]
+341 155h | 38D1h 0011100011010001b |     CMP r0, r1
+342 156h | 9009h 1001000000001001b |     ZLS
+343 157h | 4A84h 0100101010000100b |         STR r1, z[4]
+344 158h | 4882h 0100100010000010b |         STR r0, z[2]
+345 159h | 8240h 1000001001000000b |     WAK
+346 15Ah | 4084h 0100000010000100b |     LDR     r0, z[4]
+347 15Bh | 8210h 1000001000010000b |     BX
+348 15Ch |                         | 
+348 15Ch |                         | 
+348 15Ch |                         | 
+348 15Ch |                         | ;-------------------------------------------------------------------------------
+348 15Ch |                         | ; Output_Data_Block
+348 15Ch |                         | ;
+348 15Ch |                         | ; Description:
+348 15Ch |                         | ;
+348 15Ch |                         | ;   The output function, which dumps 64 bytes of data out through the column
+348 15Ch |                         | ;   data bus.  This can be called with different starting addresses to determine
+348 15Ch |                         | ;   whether X, Y, Z or some other block is output.
+348 15Ch |                         | ;
+348 15Ch |                         | ; Inputs:
+348 15Ch |                         | ;
+348 15Ch |                         | ;   r0          The address to begin outputing.  The last byte will be output
+348 15Ch |                         | ;               from address r0+63.
+348 15Ch |                         | ;
+348 15Ch |                         | ; Outputs:
+348 15Ch |                         | ;
+348 15Ch |                         | ;   -           64 bytes for each NP on column data bus.
+348 15Ch |                         | ;
+348 15Ch |                         | ; Registers Modified:
+348 15Ch |                         | ;
+348 15Ch |                         | ;   r0, r1
+348 15Ch |                         | ;-------------------------------------------------------------------------------
+348 15Ch |                         | 
+348 15Ch |                         | Output_Data_Block:
+348 15Ch |                         | 
+348 15Ch | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address.
+349 15Dh | 0340h 0000001101000000b |     ADD     r1, 64      
+350 15Eh |                         | 
+350 15Eh |                         | OUTPUT_DATA_BLOCK_LOOP:
+350 15Eh |                         | 
+350 15Eh | A0F0h 1010000011110000b |     OUT     [r0], 0          ; Row 0
+351 15Fh | A2F0h 1010001011110000b |     OUT     [r0], 1          ; Row 1
+352 160h | A4F0h 1010010011110000b |     OUT     [r0], 2          ; Row 2
+353 161h | A6F0h 1010011011110000b |     OUT     [r0], 3          ; Row 3
+354 162h | A8F0h 1010100011110000b |     OUT     [r0], 4          ; Row 4
+355 163h | AAF0h 1010101011110000b |     OUT     [r0], 5          ; Row 5
+356 164h | ACF0h 1010110011110000b |     OUT     [r0], 6          ; Row 6
+357 165h | AEF0h 1010111011110000b |     OUT     [r0], 7          ; Row 7
+358 166h |                         |     
+358 166h | 0101h 0000000100000001b |     ADD     r0, 1
+359 167h | 38D1h 0011100011010001b |     CMP     r0, r1
+360 168h | D5E1h 1101010111100001b |     BNE     OUTPUT_DATA_BLOCK_LOOP
+361 169h | 8210h 1000001000010000b |     BX 

@@ -1,0 +1,126 @@
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | ; power-test.npasm
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | 
+  0 000h |                         | ; program to test the power dissipation of PIRANHA
+  0 000h |                         | ; turn off NPs at various levels
+  0 000h |                         | 
+  0 000h |                         | #define MASK_AF        01000000b   ; Mask for ADC active flag
+  0 000h |                         | #define BZ             BEQ         ; Alias branch if zero to branch if equal
+  0 000h |                         | #define BNZ            BNE         ; Alias branch if not zero to branch if not equal
+  0 000h |                         | #define START_OF_X     00000000b   ; Start address of X RAM
+  0 000h |                         | #define START_OF_Y     01000000b   ; Start address of X RAM
+  0 000h |                         | #define START_OF_Z     10000000b   ; Start address of X RAM
+  0 000h |                         | #define SLEEPY_NPS     20          ; # of NPs to put to sleep
+  0 000h |                         | 
+  0 000h |                         | START:
+  0 000h |                         | 
+  0 000h | 8280h 1000001010000000b |     NOP                     ; Add dummy cycle since imaging immediately on 
+  1 001h |                         |                             ;   reset is awkward for simulation purposes.
+  1 001h |                         | 
+  1 001h |                         | CLEAN_SLATE_INIT:
+  1 001h |                         |  
+  1 001h | 4100h 0100000100000000b |     LDR     r0, START_OF_X  ; Overwrite x ram with constant (note this is in gray code)
+  2 002h | 45FFh 0100010111111111b |     LDR     r2, 255      
+  3 003h | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address
+  4 004h | 0340h 0000001101000000b |     ADD     r1, 64      
+  5 005h |                         | 
+  5 005h |                         | CLEAN_SLATE_LOOP:
+  5 005h |                         | 
+  5 005h | 4CF0h 0100110011110000b |     STR     r2, [r0]
+  6 006h | 0101h 0000000100000001b |     ADD     r0, 1
+  7 007h | 38D1h 0011100011010001b |     CMP     r0, r1
+  8 008h | C051h 1100000001010001b |     BNE     CLEAN_SLATE_LOOP
+  9 009h |                         |  
+  9 009h |                         | ACQUIRE_RESET_IMAGE:
+  9 009h |                         | 
+  9 009h | 8220h 1000001000100000b |     IMG                     ; Acquire a new image from the ADCs with t_int = 0
+ 10 00Ah |                         | 
+ 10 00Ah |                         | WAIT_FOR_RESET_ADC:
+ 10 00Ah |                         | 
+ 10 00Ah | 40F4h 0100000011110100b |     LDR     r0, SR                ; Load the status register
+ 11 00Bh | 2140h 0010000101000000b |     AND     r0, MASK_AF           ; Check if the ADC is active
+ 12 00Ch | C0A1h 1100000010100001b |     BNZ     WAIT_FOR_RESET_ADC    ; Loop while the ADC is converting
+ 13 00Dh |                         | 
+ 13 00Dh |                         | MOVE_TO_Y_INIT:
+ 13 00Dh |                         | 
+ 13 00Dh | 4300h 0100001100000000b |     LDR     r1, START_OF_X
+ 14 00Eh | 4540h 0100010101000000b |     LDR     r2, START_OF_Y
+ 15 00Fh |                         | 
+ 15 00Fh |                         | MOVE_TO_Y:
+ 15 00Fh |                         | 
+ 15 00Fh | 40F1h 0100000011110001b |     LDR     r0, [r1]
+ 16 010h | 8820h 1000100000100000b |     GTB     r0
+ 17 011h | 48F2h 0100100011110010b |     STR     r0, [r2]
+ 18 012h | 0301h 0000001100000001b |     ADD     r1, 1
+ 19 013h | 0501h 0000010100000001b |     ADD     r2, 1
+ 20 014h | 3B40h 0011101101000000b |     CMP     r1, 64
+ 21 015h | C0F1h 1100000011110001b |     BNE     MOVE_TO_Y
+ 22 016h |                         | 
+ 22 016h |                         | SLEEP_NPS:
+ 22 016h |                         | 
+ 22 016h | 40F8h 0100000011111000b |     LDR     r0, RCR
+ 23 017h | 394Fh 0011100101001111b |     CMP     r0, 79
+ 24 018h | 900Bh 1001000000001011b |     ZLT
+ 25 019h |                         | 
+ 25 019h |                         | 	ACQUIRE_IMAGE:
+ 25 019h |                         | 	
+ 25 019h | 8220h 1000001000100000b | 	    IMG                     ; Acquire a new image from the ADCs with real t_int
+ 26 01Ah |                         | 	
+ 26 01Ah |                         | 	WAIT_FOR_ADC:
+ 26 01Ah |                         | 	
+ 26 01Ah |                         | 	    ; At this point, the FSM for the ADC is running.  Read the status register
+ 26 01Ah |                         | 	    ; to check if the conversion is finished. (Note: very inefficient)
+ 26 01Ah |                         | 	
+ 26 01Ah | 40F4h 0100000011110100b | 	    LDR     r0, SR          ; Load the status register
+ 27 01Bh | 2140h 0010000101000000b | 	    AND     r0, MASK_AF     ; Check if the ADC is active
+ 28 01Ch | C1A1h 1100000110100001b | 	    BNZ     WAIT_FOR_ADC    ; Loop while the ADC is converting
+ 29 01Dh |                         | 
+ 29 01Dh | 8240h 1000001001000000b | 	WAK
+ 30 01Eh |                         | 
+ 30 01Eh |                         | DIFFERENCE_INIT:
+ 30 01Eh |                         | 
+ 30 01Eh | 4300h 0100001100000000b |     LDR     r1, START_OF_X
+ 31 01Fh | 4540h 0100010101000000b |     LDR     r2, START_OF_Y
+ 32 020h | 4780h 0100011110000000b |     LDR     r3, START_OF_Z
+ 33 021h |                         | 
+ 33 021h |                         | DIFFERENCE:
+ 33 021h |                         | 
+ 33 021h | 40F1h 0100000011110001b |     LDR     r0, [r1]
+ 34 022h | 8820h 1000100000100000b |     GTB     r0
+ 35 023h | 10F2h 0001000011110010b |     SUB     r0, [r2]
+ 36 024h | 48F3h 0100100011110011b |     STR     r0, [r3]
+ 37 025h | 0301h 0000001100000001b |     ADD     r1, 1
+ 38 026h | 0501h 0000010100000001b |     ADD     r2, 1
+ 39 027h | 0701h 0000011100000001b |     ADD     r3, 1
+ 40 028h | 3B40h 0011101101000000b |     CMP     r1, 64
+ 41 029h | C211h 1100001000010001b |     BNE     DIFFERENCE
+ 42 02Ah |                         | 
+ 42 02Ah |                         | OUTPUT_DATA_BLOCK_INIT:
+ 42 02Ah |                         | 
+ 42 02Ah |                         |     ; Begin outputting all of the data in z, which is the newly captured image.
+ 42 02Ah |                         | 
+ 42 02Ah | 4180h 0100000110000000b |     LDR     r0, START_OF_Z  ; Output z ram
+ 43 02Bh | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address
+ 44 02Ch | 0340h 0000001101000000b |     ADD     r1, 64      
+ 45 02Dh |                         | 
+ 45 02Dh |                         | OUTPUT_DATA_BLOCK_LOOP:
+ 45 02Dh |                         | 
+ 45 02Dh | 44F0h 0100010011110000b |     LDR     r2, [r0]        ; Convert gray to binary code
+ 46 02Eh | 4CF0h 0100110011110000b |     STR     r2, [r0]
+ 47 02Fh | A0F0h 1010000011110000b |     OUT     [r0], 0         ; Row 0
+ 48 030h | A2F0h 1010001011110000b |     OUT     [r0], 1         ; Row 1
+ 49 031h | A4F0h 1010010011110000b |     OUT     [r0], 2         ; Row 2
+ 50 032h | A6F0h 1010011011110000b |     OUT     [r0], 3         ; Row 3
+ 51 033h | A8F0h 1010100011110000b |     OUT     [r0], 4         ; Row 4
+ 52 034h | AAF0h 1010101011110000b |     OUT     [r0], 5         ; Row 5
+ 53 035h | ACF0h 1010110011110000b |     OUT     [r0], 6         ; Row 6
+ 54 036h | AEF0h 1010111011110000b |     OUT     [r0], 7         ; Row 7
+ 55 037h |                         |     
+ 55 037h | 0101h 0000000100000001b |     ADD     r0, 1
+ 56 038h | 38D1h 0011100011010001b |     CMP     r0, r1
+ 57 039h | C2D1h 1100001011010001b |     BNE     OUTPUT_DATA_BLOCK_LOOP
+ 58 03Ah |                         | 
+ 58 03Ah |                         | END:
+ 58 03Ah |                         | 
+ 58 03Ah | C00Fh 1100000000001111b |     B       START

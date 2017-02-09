@@ -1,0 +1,38 @@
+ 0 000h |                         | ;-------------------------------------------------------------------------------
+ 0 000h |                         | ; upload_rcr.npasm
+ 0 000h |                         | ;-------------------------------------------------------------------------------
+ 0 000h |                         |   
+ 0 000h |                         | ; Architecture constants
+ 0 000h |                         | 
+ 0 000h |                         | #define START_OF_X          00000000b   ; Starting address of X RAM.
+ 0 000h |                         | #define START_OF_Y          01000000b   ; Starting address of Y RAM.
+ 0 000h |                         | #define START_OF_Z          10000000b   ; Starting address of X RAM.
+ 0 000h |                         | #define START_OF_V          11000000b   ; Starting address of V RAM.
+ 0 000h |                         | #define NUM_PIXELS          64          ; The number of pixels in one NP.
+ 0 000h |                         | 
+ 0 000h |                         | ; Variables
+ 0 000h |                         | 
+ 0 000h |                         | #define addr                r0          ; The address to write to.
+ 0 000h |                         | #define final_addr          r1          ; The last address to write to.
+ 0 000h |                         | #define pattern             r3          ; The pattern to write.
+ 0 000h |                         |  
+ 0 000h |                         | START:
+ 0 000h |                         | 
+ 0 000h |                         | LOAD_PATTERN_INIT:
+ 0 000h |                         |  
+ 0 000h | 4100h 0100000100000000b |     LDR     addr, START_OF_X        ; Load pattern into RAM.
+ 1 001h | 42D0h 0100001011010000b |     LDR     final_addr, addr        ; Calculate the final address.
+ 2 002h | 0340h 0000001101000000b |     ADD     final_addr, NUM_PIXELS
+ 3 003h | 46F8h 0100011011111000b |     LDR     pattern, rcr            ; Load each np with a unique pattern.
+ 4 004h |                         | 
+ 4 004h |                         | LOAD_PATTERN_LOOP:
+ 4 004h |                         | 
+ 4 004h | 4EF0h 0100111011110000b |     STR     pattern, [addr]         ; Save the pattern in each location.
+ 5 005h | 0701h 0000011100000001b |     ADD     pattern, 1              ; Increment so each pixel is different.
+ 6 006h | 0101h 0000000100000001b |     ADD     addr, 1                 ; Check if all pixels are covered.
+ 7 007h | 38D1h 0011100011010001b |     CMP     addr, final_addr
+ 8 008h | C043h 1100000001000011b |     BLO     LOAD_PATTERN_LOOP
+ 9 009h |                         |  
+ 9 009h |                         | END:
+ 9 009h |                         | 
+ 9 009h | 8300h 1000001100000000b |     RST

@@ -1,0 +1,68 @@
+;-------------------------------------------------------------------------------
+; img.npasm
+;-------------------------------------------------------------------------------
+
+#define MASK_AF 01000000b   ; Mask for ADC active flag
+#define BZ      BEQ         ; Alias branch if zero to branch if equal
+#define BNZ     BNE         ; Alias branch if not zero to branch if not equal
+
+START:
+
+    NOP                     ; Add dummy cycle since imaging immediately on 
+                            ;   reset is awkward for simulation purposes.
+CLEAN_SLATE_INIT:
+ 
+    LDR     r0, 0           ; Overwrite x ram with constant (note this is in gray code)
+    LDR     r2, 255      
+    LDR     r1, r0          ; Calculate the final address
+    ADD     r1, 64      
+
+CLEAN_SLATE_LOOP:
+
+    STR     r2, [r0]
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     CLEAN_SLATE_LOOP
+ 
+ACQUIRE_IMAGE:
+
+    NOP                     ; Normally would image here, NOP to preserve OUT 
+                            ;   address offsets.
+WAIT_FOR_ADC:
+
+    ; At this point, the FSM for the ADC is running.  Read the status register
+    ; to check if the conversion is finished. (Note: very inefficient)
+
+    LDR     r0, SR          ; Load the status register
+    AND     r0, MASK_AF     ; Check if the ADC is active
+    BNZ     WAIT_FOR_ADC    ; Loop while the ADC is converting
+
+OUTPUT_DATA_BLOCK_INIT:
+
+    ; Begin outputting all of the data in x, which is the newly captured image.
+
+    LDR     r0, 0           ; Output x ram
+    LDR     r1, r0          ; Calculate the final address
+    ADD     r1, 64      
+
+OUTPUT_DATA_BLOCK_LOOP:
+
+    LDR     r2, [r0]        ; Convert gray to binary code
+    GTB     r2
+    STR     r2, [r0]
+    OUT     [r0], 0         ; Row 0
+    OUT     [r0], 1         ; Row 1
+    OUT     [r0], 2         ; Row 2
+    OUT     [r0], 3         ; Row 3
+    OUT     [r0], 4         ; Row 4
+    OUT     [r0], 5         ; Row 5
+    OUT     [r0], 6         ; Row 6
+    OUT     [r0], 7         ; Row 7
+    
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+
+END:
+
+    B       START

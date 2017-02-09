@@ -1,0 +1,8 @@
+;-------------------------------------------------------------------------------
+; Empty placeholder used to skip initial image upload process.
+
+SKIP_UPLOAD:
+
+    NOP
+    NOP
+    RST

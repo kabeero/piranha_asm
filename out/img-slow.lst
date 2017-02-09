@@ -1,0 +1,72 @@
+ 0 000h |                         | ;-------------------------------------------------------------------------------
+ 0 000h |                         | ; img-cds.npasm
+ 0 000h |                         | ;-------------------------------------------------------------------------------
+ 0 000h |                         | 
+ 0 000h |                         | #define MASK_AF        01000000b   ; Mask for ADC active flag
+ 0 000h |                         | #define BZ             BEQ         ; Alias branch if zero to branch if equal
+ 0 000h |                         | #define BNZ            BNE         ; Alias branch if not zero to branch if not equal
+ 0 000h |                         | #define START_OF_X     00000000b   ; Start address of X RAM
+ 0 000h |                         | #define START_OF_Y     01000000b   ; Start address of X RAM
+ 0 000h |                         | #define START_OF_Z     10000000b   ; Start address of X RAM
+ 0 000h |                         | 
+ 0 000h |                         | START:
+ 0 000h |                         | 
+ 0 000h | 8280h 1000001010000000b |     NOP                     ; Add dummy cycle since imaging immediately on 
+ 1 001h |                         |                             ;   reset is awkward for simulation purposes.
+ 1 001h |                         | 
+ 1 001h |                         | CLEAN_SLATE_INIT:
+ 1 001h |                         |  
+ 1 001h | 4100h 0100000100000000b |     LDR     r0, START_OF_X  ; Overwrite x ram with constant (note this is in gray code)
+ 2 002h | 45FFh 0100010111111111b |     LDR     r2, 255      
+ 3 003h | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address
+ 4 004h | 0340h 0000001101000000b |     ADD     r1, 64      
+ 5 005h |                         | 
+ 5 005h |                         | CLEAN_SLATE_LOOP:
+ 5 005h |                         | 
+ 5 005h | 4CF0h 0100110011110000b |     STR     r2, [r0]
+ 6 006h | 0101h 0000000100000001b |     ADD     r0, 1
+ 7 007h | 38D1h 0011100011010001b |     CMP     r0, r1
+ 8 008h | C051h 1100000001010001b |     BNE     CLEAN_SLATE_LOOP
+ 9 009h |                         |  
+ 9 009h |                         | ACQUIRE_IMAGE:
+ 9 009h |                         | 
+ 9 009h | 8220h 1000001000100000b |     IMG                     ; Acquire a new image from the ADCs with real t_int
+10 00Ah |                         | 
+10 00Ah |                         | WAIT_FOR_ADC:
+10 00Ah |                         | 
+10 00Ah |                         |     ; At this point, the FSM for the ADC is running.  Read the status register
+10 00Ah |                         |     ; to check if the conversion is finished. (Note: very inefficient)
+10 00Ah |                         | 
+10 00Ah | 40F4h 0100000011110100b |     LDR     r0, SR          ; Load the status register
+11 00Bh | 2140h 0010000101000000b |     AND     r0, MASK_AF     ; Check if the ADC is active
+12 00Ch | C0A1h 1100000010100001b |     BNZ     WAIT_FOR_ADC    ; Loop while the ADC is converting
+13 00Dh |                         | 
+13 00Dh |                         | OUTPUT_DATA_BLOCK_INIT:
+13 00Dh |                         | 
+13 00Dh |                         |     ; Begin outputting all of the data in x, which is the newly captured image.
+13 00Dh |                         | 
+13 00Dh | 4100h 0100000100000000b |     LDR     r0, START_OF_X  ; Output x ram
+14 00Eh | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address
+15 00Fh | 0340h 0000001101000000b |     ADD     r1, 64      
+16 010h |                         | 
+16 010h |                         | OUTPUT_DATA_BLOCK_LOOP:
+16 010h |                         | 
+16 010h | 44F0h 0100010011110000b |     LDR     r2, [r0]        ; Convert gray to binary code
+17 011h | 8C20h 1000110000100000b |     GTB     r2
+18 012h | 4CF0h 0100110011110000b |     STR     r2, [r0]
+19 013h | A0F0h 1010000011110000b |     OUT     [r0], 0         ; Row 0
+20 014h | A2F0h 1010001011110000b |     OUT     [r0], 1         ; Row 1
+21 015h | A4F0h 1010010011110000b |     OUT     [r0], 2         ; Row 2
+22 016h | A6F0h 1010011011110000b |     OUT     [r0], 3         ; Row 3
+23 017h | A8F0h 1010100011110000b |     OUT     [r0], 4         ; Row 4
+24 018h | AAF0h 1010101011110000b |     OUT     [r0], 5         ; Row 5
+25 019h | ACF0h 1010110011110000b |     OUT     [r0], 6         ; Row 6
+26 01Ah | AEF0h 1010111011110000b |     OUT     [r0], 7         ; Row 7
+27 01Bh |                         |     
+27 01Bh | 0101h 0000000100000001b |     ADD     r0, 1
+28 01Ch | 38D1h 0011100011010001b |     CMP     r0, r1
+29 01Dh | C101h 1100000100000001b |     BNE     OUTPUT_DATA_BLOCK_LOOP
+30 01Eh |                         | 
+30 01Eh |                         | END:
+30 01Eh |                         | 
+30 01Eh | C00Fh 1100000000001111b |     B       START

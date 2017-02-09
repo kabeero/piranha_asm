@@ -1,0 +1,114 @@
+;-------------------------------------------------------------------------------
+; edge_detection_vertical.asm
+;-------------------------------------------------------------------------------
+
+; Define new instruction labels to make the code intuitive to read.
+
+#define ROW_MASK            00111000b   ; The row bits.
+#define COL_MASK            00000111b   ; The column bits.
+
+#define START_OF_X          00000000b   ; Starting address of X RAM.
+#define START_OF_Y          01000000b   ; Starting address of Y RAM.
+#define START_OF_Z          10000000b   ; Starting address of X RAM.
+#define START_OF_V          11000000b   ; Starting address of V RAM.
+ 
+#define TRUE                 1          ; True pattern
+#define FALSE                0          ; False pattern
+#define NULL                -1          ; Null pattern
+
+#define NUM_PIXELS          64          ; The number of pixels in the NP.
+
+;-------------------------------------------------------------------------------
+ 
+; Variables
+
+;-------------------------------------------------------------------------------
+
+Vertical_Edge_Detect:
+
+    LDR     r0, START_OF_X
+    LDR     r1, [r0]        ; Preload first pixel to mesh with loop
+
+VERTICAL_EDGE_DETECT_LOOP:
+
+    LDR     r1, r0
+    AND     r1, ROW_MASK
+    BZ      PIXEL_ON_EDGE
+
+PIXEL_IN_INTERIOR:
+
+    LDR     r2, [r0]
+    SUB     r1, r2      ; Assume r1 has previous value
+    STR     r1, [r0]    ; Save difference
+    ADD     r0, 1
+    B       VERTICAL_EDGE_DETECT_LOOP_END
+
+PIXEL_ON_EDGE:
+
+    ADD     r0, 7       ; Load pixel row end and pass to E NP
+    LDR     r1, [r0]
+    LDR     r1, W
+    SUB     r0, 7       ; Return to pixel
+    LDR     r2, [r0]
+    SUB     r2, r1      ; Find difference
+    STR     r2, [r0]    ; Save difference
+    LDR     r1, r2      ; Move data for use in next cycle
+    ADD     r0, 1
+    B       VERTICAL_EDGE_DETECT_LOOP_END
+
+VERTICAL_EDGE_DETECT_LOOP_END:
+
+    ADD     r0, 1
+    CMP     r0, NUM_PIXELS
+    BLS     VERTICAL_EDGE_DETECT_LOOP
+    LDR     r0, START_OF_X              ; Output X
+    BL      Output_Data_Block
+
+END:
+
+    B       END
+
+
+;-------------------------------------------------------------------------------
+; Output_Data_Block
+;
+; Description:
+;
+;   The output function, which dumps 64 bytes of data out through the column
+;   data bus.  This can be called with different starting addresses to determine
+;   whether X, Y, Z or some other block is output.
+;
+; Inputs:
+;
+;   r0          The address to begin outputing.  The last byte will be output
+;               from address r0+63.
+;
+; Outputs:
+;
+;   -           64 bytes for each NP on column data bus.
+;
+; Registers Modified:
+;
+;   r0, r1
+;-------------------------------------------------------------------------------
+
+Output_Data_Block:
+
+    LDR     r1, r0          ; Calculate the final address.
+    ADD     r1, 64      
+
+OUTPUT_DATA_BLOCK_LOOP:
+
+    OUT     [r0], 0          ; Row 0
+    OUT     [r0], 1          ; Row 1
+    OUT     [r0], 2          ; Row 2
+    OUT     [r0], 3          ; Row 3
+    OUT     [r0], 4          ; Row 4
+    OUT     [r0], 5          ; Row 5
+    OUT     [r0], 6          ; Row 6
+    OUT     [r0], 7          ; Row 7
+    
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+    BX 

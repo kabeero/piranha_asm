@@ -1,0 +1,606 @@
+;-------------------------------------------------------------------------------
+; histogram.npasm
+;
+; Computes the histogram for a full image.  This process is distributed across 
+; individual NPs and then their results are summed along the rows and columns
+; to form the final histogram.  In the end, NPs in row 0 contain the column
+; histogram bins in z[0..7] and NPs in column 0 contain the row histogram bins 
+; in z[8..15].
+;-------------------------------------------------------------------------------
+
+; Define new instruction labels to make the code intuitive to read.
+
+#define PXL_ROW_MASK        00111000b   ; The row bits for pixels
+#define PXL_COL_MASK        00000111b   ; The column bits for pixels
+
+#define NP_ROW_MASK         11110000b   ; The row bits for NPs in RCR
+#define NP_COL_MASK         00001111b   ; The column bits for NPs in RCR
+
+#define PXL_EDGE_N          00000000b   ; Matches pixels on N edge of NP
+#define PXL_EDGE_S          00111000b   ; Matches pixels on S edge of NP
+#define PXL_EDGE_W          00000000b   ; Matches pixels on W edge of NP
+#define PXL_EDGE_E          00000111b   ; Matches pixels on E edge of NP
+ 
+#define START_OF_X          00000000b   ; Starting address of X RAM.
+#define START_OF_Y          01000000b   ; Starting address of Y RAM.
+#define START_OF_Z          10000000b   ; Starting address of X RAM.
+#define START_OF_V          11000000b   ; Starting address of V RAM.
+ 
+#define TRUE                 1  ; True pattern
+#define FALSE                0  ; False pattern
+#define NULL                -1  ; Null pattern
+
+#define NUM_PIXELS  64          ; The number of pixels in the NP.
+#define MASK_AF     01000000b   ; Mask for ADC active flag
+
+; Algorithm constants.
+
+#define HIST_BIN_MASK       00111111b   ; Isolates bin portion of hist address
+#define HIST_NP_MASK        11000000b   ; Isolates NP portion of hist address
+#define HIST_NP_00          00000000b   ; Matches NW NP, bins 0..63
+#define HIST_NP_01          01000000b   ; Matches NE NP, bins 64..127
+#define HIST_NP_10          10000000b   ; Matches SW NP, bins 128..191
+#define HIST_NP_11          11000000b   ; Matches SE NP, bins 192..255
+
+; Algorithm variables.
+
+#define intensity           v0          ; The current pixel intensity being binned
+#define hist_assignment     v1          ; Allows each NP to know its bin range
+#define index               v2          ; The current pixel index being binned
+#define index_y             v3          ; index, but with y offset
+#define index_z             v4          ; index, but with z offset
+;-------------------------------------------------------------------------------
+
+ 
+START:
+ 
+; Zero all of Y and Z memory where the histograms are stored.
+         
+CLEAR_HIST:
+
+CLEAR_HIST_INIT:
+
+    LDR     r0, START_OF_Y
+    LDR     r1, 0
+
+CLEAR_HIST_LOOP:
+
+    STR     r1, [r0]
+    ADD     r0, 1
+    CMP     r0, {START_OF_Y + 2*NUM_PIXELS}
+    BLO     CLEAR_HIST_LOOP
+
+ACQUIRE_IMAGE:
+ 
+AI_ERASE_X_MEMORY:
+ 
+    LDR     r0, START_OF_X  ; Overwrite x ram with constant (note this is in gray code)
+    LDR     r2, 00h      
+    LDR     r1, r0          ; Calculate the final address
+    ADD     r1, NUM_PIXELS
+
+AI_EXM_LOOP:
+
+    STR     r2, [r0]
+    ADD     r0, 1
+    CMP     r0, r1
+    BLO     AI_EXM_LOOP
+ 
+AI_IMG:
+
+    IMG                     ; Acquire a new image from the ADCs
+
+AI_WAIT_FOR_ADC:
+
+    ; At this point, the FSM for the ADC is running.  Read the status register
+    ; to check if the conversion is finished. (Note: very inefficient)
+
+    LDR     r0, SR          ; Load the status register
+    AND     r0, MASK_AF     ; Check if the ADC is active
+    BNZ     AI_WAIT_FOR_ADC ; Loop while the ADC is converting
+     
+AI_CONVERT_TO_BINARY:
+    
+    LDR     r0, START_OF_X  ; Start of image
+    LDR     r1, r0
+    ADD     r1, NUM_PIXELS  ; End of image
+
+AI_CTB_LOOP:
+
+    LDR     r2, [r0]    ; Convert gray to binary code
+    GTB     r2
+    STR     r2, [r0]
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     AI_CTB_LOOP
+ 
+OUTPUT_ORIGINAL_IMAGE:
+
+    LDR     r0, START_OF_X
+    BL      Output_Data_Block   ; Output the image
+        
+;-------------------------------------------------------------------------------
+
+; NPs are grouped in 2x2 clusters.  The histogram will have 256 bins 
+; corresponding to intensities from 0 to 255.  Due to the number of pixels, 16
+; bit numbers are used to store bin counts.  The LSByte is stored in Y memory 
+; and the MSByte is stored in Z memory.  Each NP in the 2x2 cluster is 
+; responsible for storing 64 16-bit bins.  The ranges 0..63, 64..127, 128..191,
+; and 192..255 are stored in the NW, NE, SW, and SE NPs, respectively.  Each
+; iteration a new pixel is read and then cycled around the circle of 4 NPs.  
+; Each NP checks if the value is within its histogram range and, if so, updates
+; its bin counts.  Once all of the pixels are scanned, NP clusters shift and
+; combine their data into the cluster neareset the origin, in NP(0,0), NP (0,1),
+; NP(1,0), and NP(1,1).
+
+CLUSTER_HISTOGRAM:
+
+CH_INIT:
+
+    ; Assign each NP a range of histogram bins.  This is done using masks. 
+    ; Assignment is based on even/odd rows/columns.
+
+    ; Even columns
+
+    LDR     r0, RCR         
+    AND     r0, 01h                 ; Check if LSb of column is even or odd
+    ZNE                             ; Only even columns remain
+        LDR     r0, RCR
+        AND     r0, 10h             ; Check if LSb of row is even or odd
+        ZNE                         ; Only even rows and columns remain
+            LDR     r0, HIST_NP_00
+            STR     r0, hist_assignment
+        WAK
+        ZEQ                         ; odd rows, even columns
+            LDR     r0, HIST_NP_10
+            STR     r0, hist_assignment
+        WAK
+    WAK
+
+    ; Odd columns
+       
+    LDR     r0, RCR         
+    AND     r0, 01h                 ; Check if LSb of column is even or odd
+    ZEQ                             ; Only odd columns remain
+        LDR     r0, RCR
+        AND     r0, 10h             ; Check if LSb of row is even or odd
+        ZNE                         ; Only even rows and odd columns remain
+            LDR     r0, HIST_NP_01
+            STR     r0, hist_assignment
+        WAK
+        ZEQ                         ; odd rows, odd columns
+            LDR     r0, HIST_NP_11
+            STR     r0, hist_assignment
+        WAK
+    WAK
+
+    ; Initialize loop variables
+       
+    LDR     r0, 0               ; Start with the NW pixel
+    STR     r0, index
+
+CH_LOOP:
+
+    LDR     r1, [r0]            ; Read the pixel
+    STR     r1, intensity       ; Save pixel intensity
+    BL      Bin_Matching_Pixels
+    BL      Swap_Pixels_Horizontally
+    BL      Bin_Matching_Pixels
+    BL      Swap_Pixels_Vertically
+    BL      Bin_Matching_Pixels
+    BL      Swap_Pixels_Horizontally
+    BL      Bin_Matching_Pixels
+    LDR     r0, index
+    ADD     r0, 1
+    STR     r0, index
+    CMP     r0, NUM_PIXELS
+    BLO     CH_LOOP
+
+;-------------------------------------------------------------------------------
+    
+; At this point each 2x2 NP cluster has formed its own histogram.  All 256 bins,
+; each 16 bit, need to be shifted across the array of NPs into one central 
+; histogram, which is located in the 2x2 NP group nearest the origin.  In order
+; to speed up this process, bins are first combined column-wise in two steps and 
+; then row-wise in three steps.  The final column of NP clusters will be reading
+; garbage data during this time since they have no addition NPs to their E, but
+; this does not introduce errors since they will only read and add zeros to 
+; their bin counts.
+
+GLOBAL_HISTOGRAM:
+
+; First combine adjacent rows of clusters.
+
+GH_ADD_ROWS_X1:
+
+    LDR     r0, START_OF_Y
+    STR     r0, index_y
+    LDR     r0, START_OF_Z
+    STR     r0, index_z
+
+GH_ADD_ROWS_X1_LOOP:
+            
+    LDR     r0, index_y
+    LDR     r1, index_z
+    LDR     r2, [r0]
+    LDR     r3, [r1]
+
+    LDR     r2, S               ; Read the external NP's bin values
+    LDR     r2, S
+    LDR     r3, S
+    LDR     r3, S
+
+    LDR     r0, [r0]            ; Load this NP's bin values
+    LDR     r1, [r1]
+
+    ADD     r0, r2              ; Perform 16 bit addition
+    ADC     r1, r3      
+
+    LDR     r2, index_y         ; Save new bin value
+    LDR     r3, index_z
+    STR     r0, [r2]
+    STR     r1, [r3]
+
+    ADD     r2, 1               ; Update bin indices
+    ADD     r3, 1
+    STR     r2, index_y
+    STR     r3, index_z
+    CMP     r2, {START_OF_Y + NUM_PIXELS}   ; Are all pixels covered?
+    BLO     GH_ADD_ROWS_X1_LOOP
+
+; Now combine bins across a span of two rows.
+
+GH_ADD_ROWS_X2:
+ 
+    LDR     r0, START_OF_Y
+    STR     r0, index_y
+    LDR     r0, START_OF_Z
+    STR     r0, index_z
+
+GH_ADD_ROWS_X2_LOOP:
+
+    LDR     r0, index_y
+    LDR     r1, index_z
+    LDR     r2, [r0]
+    LDR     r3, [r1]
+
+    LDR     r2, S               ; Read the external NP's bin values
+    LDR     r2, S               ; x4 now, to jump two 2x2 clusters
+    LDR     r2, S
+    LDR     r2, S
+    LDR     r3, S
+    LDR     r3, S
+    LDR     r3, S
+    LDR     r3, S
+
+    LDR     r0, [r0]            ; Load this NP's bin values
+    LDR     r1, [r1]
+
+    ADD     r0, r2              ; Perform 16 bit addition
+    ADC     r1, r3      
+
+    LDR     r2, index_y         ; Save new bin value
+    LDR     r3, index_z
+    STR     r0, [r2]
+    STR     r1, [r3]
+
+    ADD     r2, 1                           ; Update bin indices
+    ADD     r3, 1
+    STR     r2, index_y
+    STR     r3, index_z
+    CMP     r2, {START_OF_Y + NUM_PIXELS}   ; Are all pixels covered?
+    BLO     GH_ADD_ROWS_X2_LOOP
+  
+; Combine bins across a span of one column.
+
+GH_ADD_COLS_X1:
+ 
+    LDR     r0, START_OF_Y
+    STR     r0, index_y
+    LDR     r0, START_OF_Z
+    STR     r0, index_z
+
+GH_ADD_COLS_X1_LOOP:
+
+    LDR     r0, index_y
+    LDR     r1, index_z
+    LDR     r2, [r0]
+    LDR     r3, [r1]
+
+    LDR     r2, E               ; Read the external NP's bin values
+    LDR     r2, E
+    LDR     r3, E
+    LDR     r3, E
+
+    LDR     r0, [r0]            ; Load this NP's bin values
+    LDR     r1, [r1]
+
+    ADD     r0, r2              ; Perform 16 bit addition
+    ADC     r1, r3      
+
+    LDR     r2, index_y         ; Save new bin value
+    LDR     r3, index_z
+    STR     r0, [r2]
+    STR     r1, [r3]
+
+    ADD     r2, 1                           ; Update bin indices
+    ADD     r3, 1
+    STR     r2, index_y
+    STR     r3, index_z
+    CMP     r2, {START_OF_Y + NUM_PIXELS}   ; Are all pixels covered?
+    BLO     GH_ADD_COLS_X1_LOOP
+                                   
+; Combine bins across a span of two columns.
+
+GH_ADD_COLS_X2:
+ 
+    LDR     r0, START_OF_Y
+    STR     r0, index_y
+    LDR     r0, START_OF_Z
+    STR     r0, index_z
+
+GH_ADD_COLS_X2_LOOP:
+
+    LDR     r0, index_y
+    LDR     r1, index_z
+    LDR     r2, [r0]
+    LDR     r3, [r1]
+
+    LDR     r2, E               ; Read the external NP's bin values
+    LDR     r2, E               ; x4 for two columns of 2x2 clusters
+    LDR     r2, E
+    LDR     r2, E
+    LDR     r3, E
+    LDR     r3, E
+    LDR     r3, E
+    LDR     r3, E
+
+    LDR     r0, [r0]            ; Load this NP's bin values
+    LDR     r1, [r1]
+
+    ADD     r0, r2              ; Perform 16 bit addition
+    ADC     r1, r3      
+
+    LDR     r2, index_y         ; Save new bin value
+    LDR     r3, index_z
+    STR     r0, [r2]
+    STR     r1, [r3]
+
+    ADD     r2, 1                           ; Update bin indices
+    ADD     r3, 1
+    STR     r2, index_y
+    STR     r3, index_z
+    CMP     r2, {START_OF_Y + NUM_PIXELS}   ; Are all pixels covered?
+    BLO     GH_ADD_COLS_X2_LOOP
+ 
+ 
+; Combine bins across a span of four columns.
+
+GH_ADD_COLS_X4:
+ 
+    LDR     r0, START_OF_Y
+    STR     r0, index_y
+    LDR     r0, START_OF_Z
+    STR     r0, index_z
+
+GH_ADD_COLS_X4_LOOP:
+
+    LDR     r0, index_y
+    LDR     r1, index_z
+    LDR     r2, [r0]
+    LDR     r3, [r1]
+
+    LDR     r2, E               ; Read the external NP's bin values
+    LDR     r2, E               ; x8 for 4 2x2 cluster columns
+    LDR     r2, E
+    LDR     r2, E
+    LDR     r2, E
+    LDR     r2, E
+    LDR     r2, E
+    LDR     r2, E
+    LDR     r3, E
+    LDR     r3, E
+    LDR     r3, E
+    LDR     r3, E
+    LDR     r3, E
+    LDR     r3, E
+    LDR     r3, E
+    LDR     r3, E
+
+    LDR     r0, [r0]            ; Load this NP's bin values
+    LDR     r1, [r1]
+
+    ADD     r0, r2              ; Perform 16 bit addition
+    ADC     r1, r3      
+
+    LDR     r2, index_y         ; Save new bin value
+    LDR     r3, index_z
+    STR     r0, [r2]
+    STR     r1, [r3]
+
+    ADD     r2, 1                           ; Update bin indices
+    ADD     r3, 1
+    STR     r2, index_y
+    STR     r3, index_z
+    CMP     r2, {START_OF_Y + NUM_PIXELS}   ; Are all pixels covered?
+    BLO     GH_ADD_COLS_X4_LOOP
+ 
+;-------------------------------------------------------------------------------
+       
+DEBUG:
+
+    LDR     r0, START_OF_Y
+    BL      Output_Data_Block
+    LDR     r0, START_OF_Z
+    BL      Output_Data_Block
+
+;-------------------------------------------------------------------------------
+
+    B       START
+ 
+
+
+;-------------------------------------------------------------------------------
+; Swaps pixel values vertically within a 2x2 NP cluster.
+;
+;   NP00   NP01
+;    |      |
+;    |      |
+;   NP10   NP11
+;
+; Inputs:
+;
+;   intensity   Pixel value to be swapped, probably stored in v memory
+;
+; Outputs:
+;
+;   intensity   Pixel value from NP to the N/S depending on this NP's position 
+;               in the 2x2 cluster.
+;
+; Registers Modified:
+;
+;   r0, r1
+;-------------------------------------------------------------------------------
+
+Swap_Pixels_Vertically:
+
+    LDR     r0, intensity       ; Load this NPs current intensity
+    LDR     r1, RCR             ; Turn off the odd rows
+    AND     r1, 10h 
+    ZNE
+        LDR     r1, intensity   ; Save copy of intensity for S NP
+        LDR     r0, S           ; Load pixel from S NP
+        STR     r0, intensity
+    WAK
+    ZEQ                         ; Turn off even rows
+        LDR     r1, N           ; Load pixel from N NP
+        STR     r1, intensity   ; N NP has our intensity, no tricks req'd
+    WAK
+    BX
+    
+
+ 
+;-------------------------------------------------------------------------------
+; Swaps pixel values horizontally within a 2x2 NP cluster.
+;
+;   NP00---NP01
+;
+;
+;   NP10---NP11
+;
+; Inputs:
+;
+;   intensity   Pixel value to be swapped, probably stored in v memory
+;
+; Outputs:
+;
+;   intensity   Pixel value from NP to the N/S depending on this NP's position 
+;               in the 2x2 cluster.
+;
+; Registers Modified:
+;
+;   r0, r1
+;-------------------------------------------------------------------------------
+ 
+Swap_Pixels_Horizontally:
+      
+    LDR     r0, intensity       ; Load this NPs current intensity
+    LDR     r1, RCR             ; Turn off the odd columns
+    AND     r1, 01h 
+    ZNE
+        LDR     r1, intensity   ; Save copy of intensity for E NP
+        LDR     r0, E           ; Load pixel from E NP
+        STR     r0, intensity
+    WAK
+    ZEQ                         ; Turn off even rows
+        LDR     r1, W           ; Load pixel from W NP
+        STR     r1, intensity   ; W NP has our intensity, no tricks req'd
+    WAK
+    BX
+
+
+      
+;-------------------------------------------------------------------------------
+; Determines if a passed pixel value belongs in this NP's histogram bins and, if 
+; so, updates the bin count.
+;
+; Inputs:
+;
+;   intensity   Pixel value to be binned, 0..255
+;
+; Outputs:
+;
+;   Local NP bins in Y and Z memory are updated
+;
+; Registers Modified:
+;
+;   r0, r1, r2, r3
+;-------------------------------------------------------------------------------
+
+Bin_Matching_Pixels:
+
+    ; Check if pixel belongs in this NP's bins.
+
+    LDR     r0, intensity           ; Load this NP's current intensity
+    AND     r0, HIST_NP_MASK        ; Check if this intensity belongs to this NP
+    CMP     r0, hist_assignment 
+    ZNE     
+        LDR     r0, intensity       ; Isolate the bin address
+        AND     r0, HIST_BIN_MASK
+        LDR     r1, r0              ; Calculate the LSB and MSB addresses
+        ADD     r0, START_OF_Y
+        ADD     r1, START_OF_Z
+        LDR     r2, [r0]            ; Peform 16 bit addition
+        LDR     r3, [r1]            ; Peform 16 bit addition
+        ADD     r2, 1
+        ADC     r3, 0
+        STR     r2, [r0]            ; Save the 16 bit result
+        STR     r3, [r1]
+    WAK
+    BX
+
+
+
+;-------------------------------------------------------------------------------
+; Output_Data_Block
+;
+; Description:
+;
+;   The output function, which dumps 64 bytes of data out through the column
+;   data bus.  This can be called with different starting addresses to determine
+;   whether X, Y, Z or some other block is output.
+;
+; Inputs:
+;
+;   r0          The address to begin outputing.  The last byte will be output
+;               from address r0+63.
+;
+; Outputs:
+;
+;   -           64 bytes for each NP on column data bus.
+;
+; Registers Modified:
+;
+;   r0, r1
+;-------------------------------------------------------------------------------
+
+Output_Data_Block:
+
+    LDR     r1, r0          ; Calculate the final address.
+    ADD     r1, 64      
+
+OUTPUT_DATA_BLOCK_LOOP:
+
+    OUT     [r0], 0          ; Row 0
+    OUT     [r0], 1          ; Row 1
+    OUT     [r0], 2          ; Row 2
+    OUT     [r0], 3          ; Row 3
+    OUT     [r0], 4          ; Row 4
+    OUT     [r0], 5          ; Row 5
+    OUT     [r0], 6          ; Row 6
+    OUT     [r0], 7          ; Row 7
+    
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+    BX 

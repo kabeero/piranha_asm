@@ -1,0 +1,61 @@
+;-------------------------------------------------------------------------------
+; rcr_readout.npasm
+;-------------------------------------------------------------------------------
+  
+; Architecture constants
+
+#define START_OF_X          00000000b   ; Starting address of X RAM.
+#define START_OF_Y          01000000b   ; Starting address of Y RAM.
+#define START_OF_Z          10000000b   ; Starting address of X RAM.
+#define START_OF_V          11000000b   ; Starting address of V RAM.
+#define NUM_PIXELS          64          ; The number of pixels in one NP.
+
+; Variables
+
+#define addr                r0          ; The address to write to.
+#define final_addr          r1          ; The last address to write to.
+#define pattern             r3          ; The pattern to write.
+
+START:
+
+LOAD_PATTERN_INIT:
+ 
+    LDR     addr, START_OF_X        ; Load pattern into RAM.
+    LDR     final_addr, addr        ; Calculate the final address.
+    ADD     final_addr, NUM_PIXELS
+    LDR     pattern, rcr            ; Load each np with a unique pattern.
+
+LOAD_PATTERN_LOOP:
+
+    STR     pattern, [addr]         ; Save the pattern in each location.
+    ADD     pattern, 1              ; Increment so each pixel is different.
+    ADD     addr, 1                 ; Check if all pixels are covered.
+    CMP     addr, final_addr
+    BLO     LOAD_PATTERN_LOOP
+ 
+OUTPUT_DATA_BLOCK_SETUP:
+
+    LDR     addr, START_OF_X        ; Output the X RAM.
+    LDR     final_addr, addr        ; Calculate the final address.
+    ADD     final_addr, NUM_PIXELS
+                
+OUTPUT_DATA_BLOCK_LOOP:
+
+    OUT     [addr], 0               ; Row 0
+    OUT     [addr], 1               ; Row 1
+    OUT     [addr], 2               ; Row 2
+    OUT     [addr], 3               ; Row 3
+    OUT     [addr], 4               ; Row 4
+    OUT     [addr], 5               ; Row 5
+    OUT     [addr], 6               ; Row 6
+    OUT     [addr], 7               ; Row 7
+    
+    ADD     addr, 1                 ; Check if done outputting the RAM.
+    CMP     addr, final_addr
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+
+END:
+
+    B       START
+
+ 

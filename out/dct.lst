@@ -1,0 +1,696 @@
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | ; dct.npasm
+  0 000h |                         | ;
+  0 000h |                         | ; 2D forward DCT done in an 8x8 block (one NP).  Based on the paper "Practical
+  0 000h |                         | ; Fast 1-D DCT Algorithms with 11 Multiplications".
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | 
+  0 000h |                         | ; Define new instruction labels to make the code intuitive to read.
+  0 000h |                         | 
+  0 000h |                         | #define ADC_MASK            01000000b   ; Mask for ADC active flag
+  0 000h |                         | #define ROW_MASK            00111000b   ; The row bits.
+  0 000h |                         | #define COL_MASK            00000111b   ; The column bits.
+  0 000h |                         | 
+  0 000h |                         | #define START_OF_X          00000000b   ; Starting address of X RAM.
+  0 000h |                         | #define START_OF_Y          01000000b   ; Starting address of Y RAM.
+  0 000h |                         | #define START_OF_Z          10000000b   ; Starting address of X RAM.
+  0 000h |                         | #define START_OF_V          11000000b   ; Starting address of V RAM.
+  0 000h |                         |  
+  0 000h |                         | #define TRUE                 1          ; True pattern
+  0 000h |                         | #define FALSE                0          ; False pattern
+  0 000h |                         | #define NULL                -1          ; Null pattern
+  0 000h |                         | 
+  0 000h |                         | #define NUM_PIXELS          64          ; The number of pixels in the NP.
+  0 000h |                         | 
+  0 000h |                         | ; Macros
+  0 000h |                         |              
+  0 000h |                         | ; a = (a + b)/2
+  0 000h |                         | ; b = (a - b)/2
+  0 000h |                         | ;#macro add_sub (a, b)
+  0 000h |                         | ;    LDR     r0, $a
+  0 000h |                         | ;    ASR     r0
+  0 000h |                         | ;    LDR     r1, r0      ; Save for sub op in a few lines
+  0 000h |                         | ;    LDR     r2, $b
+  0 000h |                         | ;    ASR     r2
+  0 000h |                         | ;    ADD     r0, r2      ; (a + b) / 2
+  0 000h |                         | ;    SUB     r1, r2      ; (a - b) / 2
+  0 000h |                         | ;    STR     r0, $a      ; Save result back to source
+  0 000h |                         | ;    STR     r1, $b
+  0 000h |                         | ;#endmacro
+  0 000h |                         |                   
+  0 000h |                         | ; a = (a + b)/4
+  0 000h |                         | ; b = (a - b)/4
+  0 000h |                         | ;#macro add_sub_div (a, b)
+  0 000h |                         | ;    LDR     r0, $a
+  0 000h |                         | ;    ASR     r0
+  0 000h |                         | ;    LDR     r1, r0      ; Save for sub op in a few lines
+  0 000h |                         | ;    LDR     r2, $b
+  0 000h |                         | ;    ASR     r2
+  0 000h |                         | ;    ADD     r0, r2      ; (a + b) / 2
+  0 000h |                         | ;    SUB     r1, r2      ; (a - b) / 2
+  0 000h |                         | ;    ASR     r0          ; (a + b) / 4
+  0 000h |                         | ;    ASR     r1          ; (a - b) / 4
+  0 000h |                         | ;    STR     r0, $a      ; Save result back to source
+  0 000h |                         | ;    STR     r1, $b
+  0 000h |                         | ;#endmacro
+  0 000h |                         |                   
+  0 000h |                         | ; a = (b - a)/4
+  0 000h |                         | ; b = (a + b)/4
+  0 000h |                         | ;#macro add_sub_div_swap (a, b)
+  0 000h |                         | ;    LDR     r0, $a
+  0 000h |                         | ;    ASR     r0
+  0 000h |                         | ;    LDR     r1, r0      ; Save for sub op in a few lines
+  0 000h |                         | ;    LDR     r2, $b
+  0 000h |                         | ;    ASR     r2
+  0 000h |                         | ;    ADD     r0, r2      ; (a + b) / 2
+  0 000h |                         | ;    SUB     r2, r1      ; (b - a) / 2
+  0 000h |                         | ;    ASR     r0          ; (a + b) / 4
+  0 000h |                         | ;    ASR     r2          ; (b - a) / 4
+  0 000h |                         | ;    STR     r0, $b      ; Save result back to source
+  0 000h |                         | ;    STR     r2, $a
+  0 000h |                         | ;#endmacro
+  0 000h |                         |            
+  0 000h |                         | ; Loads, DCTs, stores row of data
+  0 000h |                         | ;#macro dct_row (row)
+  0 000h |                         | ;    LDR     r0, {START_OF_X + 8*$row}
+  0 000h |                         | ;    BL      LOAD_ROW
+  0 000h |                         | ;    BL      DCT
+  0 000h |                         | ;    LDR     r0, {START_OF_X + 8*$row}
+  0 000h |                         | ;    BL      STORE_ROW
+  0 000h |                         | ;#endmacro
+  0 000h |                         |            
+  0 000h |                         | ; Loads, DCTs, stores col of data
+  0 000h |                         | ;#macro dct_col (col)
+  0 000h |                         | ;    LDR     r0, {START_OF_X + $col}
+  0 000h |                         | ;    BL      LOAD_COL
+  0 000h |                         | ;    BL      DCT
+  0 000h |                         | ;    LDR     r0, {START_OF_X + $col}
+  0 000h |                         | ;    BL      STORE_COL
+  0 000h |                         | ;#endmacro
+  0 000h |                         |                                
+  0 000h |                         | CLEAN_SLATE_INIT:
+  0 000h |                         |  
+  0 000h | 4100h 0100000100000000b |     LDR     r0, START_OF_X  ; Overwrite x ram with constant (note this is in gray code)
+  1 001h | 4500h 0100010100000000b |     LDR     r2, 0
+  2 002h | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address
+  3 003h | 0340h 0000001101000000b |     ADD     r1, NUM_PIXELS      
+  4 004h |                         | 
+  4 004h |                         | CLEAN_SLATE_LOOP:
+  4 004h |                         | 
+  4 004h | 4CF0h 0100110011110000b |     STR     r2, [r0]
+  5 005h | 0101h 0000000100000001b |     ADD     r0, 1
+  6 006h | 38D1h 0011100011010001b |     CMP     r0, r1
+  7 007h | C041h 1100000001000001b |     BNE     CLEAN_SLATE_LOOP
+  8 008h |                         |  
+  8 008h |                         | START:
+  8 008h |                         | 
+  8 008h |                         | ACQUIRE_IMAGE:
+  8 008h |                         | 
+  8 008h | 8220h 1000001000100000b |     IMG                     ; Acquire a new image from the ADCs with real t_int
+  9 009h |                         | 
+  9 009h |                         | WAIT_FOR_ADC:
+  9 009h |                         | 
+  9 009h |                         |     ; At this point, the FSM for the ADC is running.  Read the status register
+  9 009h |                         |     ; to check if the conversion is finished. (Note: very inefficient)
+  9 009h |                         | 
+  9 009h | 40F4h 0100000011110100b |     LDR     r0, SR          ; Load the status register
+ 10 00Ah | 2140h 0010000101000000b |     AND     r0, ADC_MASK    ; Check if the ADC is active
+ 11 00Bh | C091h 1100000010010001b |     BNZ     WAIT_FOR_ADC    ; Loop while the ADC is converting
+ 12 00Ch |                         | 
+ 12 00Ch |                         | CONVERT_TO_BINARY:
+ 12 00Ch |                         |     
+ 12 00Ch | 4100h 0100000100000000b |     LDR     r0, START_OF_X  ; Start of image
+ 13 00Dh | 42D0h 0100001011010000b |     LDR     r1, r0
+ 14 00Eh | 0340h 0000001101000000b |     ADD     r1, NUM_PIXELS  ; End of image
+ 15 00Fh |                         | 
+ 15 00Fh |                         | CONVERT_TO_BINARY_LOOP:
+ 15 00Fh |                         | 
+ 15 00Fh | 44F0h 0100010011110000b |     LDR     r2, [r0]    ; Convert gray to binary code
+ 16 010h | 8C20h 1000110000100000b |     GTB     r2
+ 17 011h | 4CF0h 0100110011110000b |     STR     r2, [r0]
+ 18 012h | 0101h 0000000100000001b |     ADD     r0, 1
+ 19 013h | 38D1h 0011100011010001b |     CMP     r0, r1
+ 20 014h | C0F1h 1100000011110001b |     BNE     CONVERT_TO_BINARY_LOOP
+ 21 015h |                         |  
+ 21 015h |                         | ; First convert 8 bit unsigned values to signed values.  One options is to LSR,
+ 21 015h |                         | ; making the input data effectively 7 bits.  A better way is to subtract 128 from
+ 21 015h |                         | ; the input.  The DCT will be unchanged, except the DC (x0) component will be
+ 21 015h |                         | ; reduced by 128, which can be corrected later.  This maintains 8 bit resolution.
+ 21 015h |                         |                     
+ 21 015h | 4100h 0100000100000000b |     LDR     r0, START_OF_X
+ 22 016h |                         | 
+ 22 016h |                         | APPLY_DC_OFFSET:
+ 22 016h |                         | 
+ 22 016h | 42F0h 0100001011110000b |     LDR     r1, [r0]
+ 23 017h | 1380h 0001001110000000b |     SUB     r1, 128
+ 24 018h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+ 25 019h | 0101h 0000000100000001b |     ADD     r0, 1
+ 26 01Ah | 3940h 0011100101000000b |     CMP     r0, {START_OF_X + NUM_PIXELS}
+ 27 01Bh | C161h 1100000101100001b |     BNE     APPLY_DC_OFFSET     ; Detects end of pixel array.
+ 28 01Ch |                         |     
+ 28 01Ch |                         | CALL_DCT_ROW:
+ 28 01Ch |                         | 
+ 28 01Ch | 4100h 0100000100000000b |     LDR     r0, {START_OF_X + 8*0}
+ 29 01Dh | F150h 1111000101010000b |     BL      LOAD_ROW
+ 30 01Eh | E780h 1110011110000000b |     BL      DCT
+ 31 01Fh | 4100h 0100000100000000b |     LDR     r0, {START_OF_X + 8*0}
+ 32 020h | F2E0h 1111001011100000b |     BL      STORE_ROW
+ 33 021h | 4108h 0100000100001000b |     LDR     r0, {START_OF_X + 8*1}
+ 34 022h | F150h 1111000101010000b |     BL      LOAD_ROW
+ 35 023h | E780h 1110011110000000b |     BL      DCT
+ 36 024h | 4108h 0100000100001000b |     LDR     r0, {START_OF_X + 8*1}
+ 37 025h | F2E0h 1111001011100000b |     BL      STORE_ROW
+ 38 026h | 4110h 0100000100010000b |     LDR     r0, {START_OF_X + 8*2}
+ 39 027h | F150h 1111000101010000b |     BL      LOAD_ROW
+ 40 028h | E780h 1110011110000000b |     BL      DCT
+ 41 029h | 4110h 0100000100010000b |     LDR     r0, {START_OF_X + 8*2}
+ 42 02Ah | F2E0h 1111001011100000b |     BL      STORE_ROW
+ 43 02Bh | 4118h 0100000100011000b |     LDR     r0, {START_OF_X + 8*3}
+ 44 02Ch | F150h 1111000101010000b |     BL      LOAD_ROW
+ 45 02Dh | E780h 1110011110000000b |     BL      DCT
+ 46 02Eh | 4118h 0100000100011000b |     LDR     r0, {START_OF_X + 8*3}
+ 47 02Fh | F2E0h 1111001011100000b |     BL      STORE_ROW
+ 48 030h | 4120h 0100000100100000b |     LDR     r0, {START_OF_X + 8*4}
+ 49 031h | F150h 1111000101010000b |     BL      LOAD_ROW
+ 50 032h | E780h 1110011110000000b |     BL      DCT
+ 51 033h | 4120h 0100000100100000b |     LDR     r0, {START_OF_X + 8*4}
+ 52 034h | F2E0h 1111001011100000b |     BL      STORE_ROW
+ 53 035h | 4128h 0100000100101000b |     LDR     r0, {START_OF_X + 8*5}
+ 54 036h | F150h 1111000101010000b |     BL      LOAD_ROW
+ 55 037h | E780h 1110011110000000b |     BL      DCT
+ 56 038h | 4128h 0100000100101000b |     LDR     r0, {START_OF_X + 8*5}
+ 57 039h | F2E0h 1111001011100000b |     BL      STORE_ROW
+ 58 03Ah | 4130h 0100000100110000b |     LDR     r0, {START_OF_X + 8*6}
+ 59 03Bh | F150h 1111000101010000b |     BL      LOAD_ROW
+ 60 03Ch | E780h 1110011110000000b |     BL      DCT
+ 61 03Dh | 4130h 0100000100110000b |     LDR     r0, {START_OF_X + 8*6}
+ 62 03Eh | F2E0h 1111001011100000b |     BL      STORE_ROW
+ 63 03Fh | 4138h 0100000100111000b |     LDR     r0, {START_OF_X + 8*7}
+ 64 040h | F150h 1111000101010000b |     BL      LOAD_ROW
+ 65 041h | E780h 1110011110000000b |     BL      DCT
+ 66 042h | 4138h 0100000100111000b |     LDR     r0, {START_OF_X + 8*7}
+ 67 043h | F2E0h 1111001011100000b |     BL      STORE_ROW
+ 68 044h |                         |     
+ 68 044h |                         | CALL_DCT_COL:
+ 68 044h |                         | 
+ 68 044h | 4100h 0100000100000000b |     LDR     r0, {START_OF_X + 0}
+ 69 045h | F470h 1111010001110000b |     BL      LOAD_COL
+ 70 046h | E780h 1110011110000000b |     BL      DCT
+ 71 047h | 4100h 0100000100000000b |     LDR     r0, {START_OF_X + 0}
+ 72 048h | F600h 1111011000000000b |     BL      STORE_COL
+ 73 049h | 4101h 0100000100000001b |     LDR     r0, {START_OF_X + 1}
+ 74 04Ah | F470h 1111010001110000b |     BL      LOAD_COL
+ 75 04Bh | E780h 1110011110000000b |     BL      DCT
+ 76 04Ch | 4101h 0100000100000001b |     LDR     r0, {START_OF_X + 1}
+ 77 04Dh | F600h 1111011000000000b |     BL      STORE_COL
+ 78 04Eh | 4102h 0100000100000010b |     LDR     r0, {START_OF_X + 2}
+ 79 04Fh | F470h 1111010001110000b |     BL      LOAD_COL
+ 80 050h | E780h 1110011110000000b |     BL      DCT
+ 81 051h | 4102h 0100000100000010b |     LDR     r0, {START_OF_X + 2}
+ 82 052h | F600h 1111011000000000b |     BL      STORE_COL
+ 83 053h | 4103h 0100000100000011b |     LDR     r0, {START_OF_X + 3}
+ 84 054h | F470h 1111010001110000b |     BL      LOAD_COL
+ 85 055h | E780h 1110011110000000b |     BL      DCT
+ 86 056h | 4103h 0100000100000011b |     LDR     r0, {START_OF_X + 3}
+ 87 057h | F600h 1111011000000000b |     BL      STORE_COL
+ 88 058h | 4104h 0100000100000100b |     LDR     r0, {START_OF_X + 4}
+ 89 059h | F470h 1111010001110000b |     BL      LOAD_COL
+ 90 05Ah | E780h 1110011110000000b |     BL      DCT
+ 91 05Bh | 4104h 0100000100000100b |     LDR     r0, {START_OF_X + 4}
+ 92 05Ch | F600h 1111011000000000b |     BL      STORE_COL
+ 93 05Dh | 4105h 0100000100000101b |     LDR     r0, {START_OF_X + 5}
+ 94 05Eh | F470h 1111010001110000b |     BL      LOAD_COL
+ 95 05Fh | E780h 1110011110000000b |     BL      DCT
+ 96 060h | 4105h 0100000100000101b |     LDR     r0, {START_OF_X + 5}
+ 97 061h | F600h 1111011000000000b |     BL      STORE_COL
+ 98 062h | 4106h 0100000100000110b |     LDR     r0, {START_OF_X + 6}
+ 99 063h | F470h 1111010001110000b |     BL      LOAD_COL
+100 064h | E780h 1110011110000000b |     BL      DCT
+101 065h | 4106h 0100000100000110b |     LDR     r0, {START_OF_X + 6}
+102 066h | F600h 1111011000000000b |     BL      STORE_COL
+103 067h | 4107h 0100000100000111b |     LDR     r0, {START_OF_X + 7}
+104 068h | F470h 1111010001110000b |     BL      LOAD_COL
+105 069h | E780h 1110011110000000b |     BL      DCT
+106 06Ah | 4107h 0100000100000111b |     LDR     r0, {START_OF_X + 7}
+107 06Bh | F600h 1111011000000000b |     BL      STORE_COL
+108 06Ch |                         | 
+108 06Ch |                         | ; Clear all values except (0,0) DC pixel
+108 06Ch |                         | 
+108 06Ch |                         | ZEROS_INIT:
+108 06Ch |                         | 
+108 06Ch | 4300h 0100001100000000b |     LDR    r1, {START_OF_X} 
+109 06Dh | 0340h 0000001101000000b |     ADD    r1, NUM_PIXELS
+110 06Eh | 4100h 0100000100000000b |     LDR    r0, {START_OF_X}
+111 06Fh | 0101h 0000000100000001b |     ADD    r0, 1
+112 070h |                         | 
+112 070h |                         | ZEROS:
+112 070h |                         |     
+112 070h | 4500h 0100010100000000b |     LDR    r2, 0
+113 071h |                         |     ; STR    r2, [r0]
+113 071h | 4CD2h 0100110011010010b |     STR    r2, r2
+114 072h | 0101h 0000000100000001b |     ADD    r0, 1
+115 073h | 38D1h 0011100011010001b |     CMP    r0, r1
+116 074h | C701h 1100011100000001b |     BNE    ZEROS
+117 075h |                         | 
+117 075h |                         | OUTPUT:
+117 075h |                         | 
+117 075h | 4100h 0100000100000000b |     LDR     r0, START_OF_X
+118 076h | F790h 1111011110010000b |     BL      Output_Data_Block
+119 077h |                         | 
+119 077h |                         | END:
+119 077h |                         | 
+119 077h | 8300h 1000001100000000b |     RST
+120 078h |                         |  
+120 078h |                         | ;-------------------------------------------------------------------------------
+120 078h |                         | ; DCT
+120 078h |                         | ;-------------------------------------------------------------------------------
+120 078h |                         |  
+120 078h |                         | DCT:
+120 078h |                         | 
+120 078h |                         | STAGE1: ; Butterflies
+120 078h |                         |      
+120 078h | 40C0h 0100000011000000b |     LDR     r0, v0
+121 079h | 8900h 1000100100000000b |     ASR     r0
+122 07Ah | 42D0h 0100001011010000b |     LDR     r1, r0      ; Save for sub op in a few lines
+123 07Bh | 44C7h 0100010011000111b |     LDR     r2, v7
+124 07Ch | 8D00h 1000110100000000b |     ASR     r2
+125 07Dh | 00D2h 0000000011010010b |     ADD     r0, r2      ; (a + b) / 2
+126 07Eh | 12D2h 0001001011010010b |     SUB     r1, r2      ; (a - b) / 2
+127 07Fh | 48C0h 0100100011000000b |     STR     r0, v0      ; Save result back to source
+128 080h | 4AC7h 0100101011000111b |     STR     r1, v7
+129 081h | 40C1h 0100000011000001b |     LDR     r0, v1
+130 082h | 8900h 1000100100000000b |     ASR     r0
+131 083h | 42D0h 0100001011010000b |     LDR     r1, r0      ; Save for sub op in a few lines
+132 084h | 44C6h 0100010011000110b |     LDR     r2, v6
+133 085h | 8D00h 1000110100000000b |     ASR     r2
+134 086h | 00D2h 0000000011010010b |     ADD     r0, r2      ; (a + b) / 2
+135 087h | 12D2h 0001001011010010b |     SUB     r1, r2      ; (a - b) / 2
+136 088h | 48C1h 0100100011000001b |     STR     r0, v1      ; Save result back to source
+137 089h | 4AC6h 0100101011000110b |     STR     r1, v6
+138 08Ah | 40C2h 0100000011000010b |     LDR     r0, v2
+139 08Bh | 8900h 1000100100000000b |     ASR     r0
+140 08Ch | 42D0h 0100001011010000b |     LDR     r1, r0      ; Save for sub op in a few lines
+141 08Dh | 44C5h 0100010011000101b |     LDR     r2, v5
+142 08Eh | 8D00h 1000110100000000b |     ASR     r2
+143 08Fh | 00D2h 0000000011010010b |     ADD     r0, r2      ; (a + b) / 2
+144 090h | 12D2h 0001001011010010b |     SUB     r1, r2      ; (a - b) / 2
+145 091h | 48C2h 0100100011000010b |     STR     r0, v2      ; Save result back to source
+146 092h | 4AC5h 0100101011000101b |     STR     r1, v5
+147 093h | 40C3h 0100000011000011b |     LDR     r0, v3
+148 094h | 8900h 1000100100000000b |     ASR     r0
+149 095h | 42D0h 0100001011010000b |     LDR     r1, r0      ; Save for sub op in a few lines
+150 096h | 44C4h 0100010011000100b |     LDR     r2, v4
+151 097h | 8D00h 1000110100000000b |     ASR     r2
+152 098h | 00D2h 0000000011010010b |     ADD     r0, r2      ; (a + b) / 2
+153 099h | 12D2h 0001001011010010b |     SUB     r1, r2      ; (a - b) / 2
+154 09Ah | 48C3h 0100100011000011b |     STR     r0, v3      ; Save result back to source
+155 09Bh | 4AC4h 0100101011000100b |     STR     r1, v4
+156 09Ch |                         | 
+156 09Ch |                         | STAGE2: ; Lifting, not scaled by /2, so could overflow (seems ok in matlab sim).
+156 09Ch |                         | 
+156 09Ch |                         |     ; x5 = x5 - (7/16)*x6
+156 09Ch | 42C6h 0100001011000110b |     LDR     r1, v6
+157 09Dh | 8B00h 1000101100000000b |     ASR     r1
+158 09Eh | 8B00h 1000101100000000b |     ASR     r1
+159 09Fh | 40D1h 0100000011010001b |     LDR     r0, r1              ; (1/4)*x6
+160 0A0h | 8B00h 1000101100000000b |     ASR     r1
+161 0A1h | 00D1h 0000000011010001b |     ADD     r0, r1              ; (3/8)*x6
+162 0A2h | 8B00h 1000101100000000b |     ASR     r1
+163 0A3h | 00D1h 0000000011010001b |     ADD     r0, r1              ; (7/16)*x6
+164 0A4h | 42C5h 0100001011000101b |     LDR     r1, v5
+165 0A5h | 12D0h 0001001011010000b |     SUB     r1, r0              
+166 0A6h | 4AC5h 0100101011000101b |     STR     r1, v5              ; x5 = x5 - (7/16)*x6
+167 0A7h |                         |                
+167 0A7h |                         |     ; x6 = x6 + (3/4)*x5
+167 0A7h | 42C5h 0100001011000101b |     LDR     r1, v5
+168 0A8h | 8B00h 1000101100000000b |     ASR     r1
+169 0A9h | 40D1h 0100000011010001b |     LDR     r0, r1              ; (1/2)*x5
+170 0AAh | 8B00h 1000101100000000b |     ASR     r1
+171 0ABh | 00D1h 0000000011010001b |     ADD     r0, r1              ; (3/4)*x5
+172 0ACh | 42C6h 0100001011000110b |     LDR     r1, v6
+173 0ADh | 02D0h 0000001011010000b |     ADD     r1, r0              
+174 0AEh | 4AC6h 0100101011000110b |     STR     r1, v6              ; x6 = x6 + (3/4)*x5
+175 0AFh |                         |                
+175 0AFh |                         |     ; x5 = (3/8)*x6 - x5
+175 0AFh | 42C6h 0100001011000110b |     LDR     r1, v6
+176 0B0h | 8B00h 1000101100000000b |     ASR     r1
+177 0B1h | 8B00h 1000101100000000b |     ASR     r1
+178 0B2h | 40D1h 0100000011010001b |     LDR     r0, r1              ; (1/4)*x6
+179 0B3h | 8B00h 1000101100000000b |     ASR     r1
+180 0B4h | 00D1h 0000000011010001b |     ADD     r0, r1              ; (3/8)*x6
+181 0B5h | 42C5h 0100001011000101b |     LDR     r1, v5
+182 0B6h | 10D1h 0001000011010001b |     SUB     r0, r1              
+183 0B7h | 48C5h 0100100011000101b |     STR     r0, v5              ; x5 = (3/8)*x6 - x5
+184 0B8h |                         | 
+184 0B8h |                         | STAGE3: ; Butterflies, but version that scales outputs for next lifting section.
+184 0B8h |                         | 
+184 0B8h | 40C0h 0100000011000000b |     LDR     r0, v0
+185 0B9h | 8900h 1000100100000000b |     ASR     r0
+186 0BAh | 42D0h 0100001011010000b |     LDR     r1, r0      ; Save for sub op in a few lines
+187 0BBh | 44C3h 0100010011000011b |     LDR     r2, v3
+188 0BCh | 8D00h 1000110100000000b |     ASR     r2
+189 0BDh | 00D2h 0000000011010010b |     ADD     r0, r2      ; (a + b) / 2
+190 0BEh | 12D2h 0001001011010010b |     SUB     r1, r2      ; (a - b) / 2
+191 0BFh | 8900h 1000100100000000b |     ASR     r0          ; (a + b) / 4
+192 0C0h | 8B00h 1000101100000000b |     ASR     r1          ; (a - b) / 4
+193 0C1h | 48C0h 0100100011000000b |     STR     r0, v0      ; Save result back to source
+194 0C2h | 4AC3h 0100101011000011b |     STR     r1, v3
+195 0C3h | 40C1h 0100000011000001b |     LDR     r0, v1
+196 0C4h | 8900h 1000100100000000b |     ASR     r0
+197 0C5h | 42D0h 0100001011010000b |     LDR     r1, r0      ; Save for sub op in a few lines
+198 0C6h | 44C2h 0100010011000010b |     LDR     r2, v2
+199 0C7h | 8D00h 1000110100000000b |     ASR     r2
+200 0C8h | 00D2h 0000000011010010b |     ADD     r0, r2      ; (a + b) / 2
+201 0C9h | 12D2h 0001001011010010b |     SUB     r1, r2      ; (a - b) / 2
+202 0CAh | 8900h 1000100100000000b |     ASR     r0          ; (a + b) / 4
+203 0CBh | 8B00h 1000101100000000b |     ASR     r1          ; (a - b) / 4
+204 0CCh | 48C1h 0100100011000001b |     STR     r0, v1      ; Save result back to source
+205 0CDh | 4AC2h 0100101011000010b |     STR     r1, v2
+206 0CEh | 40C4h 0100000011000100b |     LDR     r0, v4
+207 0CFh | 8900h 1000100100000000b |     ASR     r0
+208 0D0h | 42D0h 0100001011010000b |     LDR     r1, r0      ; Save for sub op in a few lines
+209 0D1h | 44C5h 0100010011000101b |     LDR     r2, v5
+210 0D2h | 8D00h 1000110100000000b |     ASR     r2
+211 0D3h | 00D2h 0000000011010010b |     ADD     r0, r2      ; (a + b) / 2
+212 0D4h | 12D2h 0001001011010010b |     SUB     r1, r2      ; (a - b) / 2
+213 0D5h | 8900h 1000100100000000b |     ASR     r0          ; (a + b) / 4
+214 0D6h | 8B00h 1000101100000000b |     ASR     r1          ; (a - b) / 4
+215 0D7h | 48C4h 0100100011000100b |     STR     r0, v4      ; Save result back to source
+216 0D8h | 4AC5h 0100101011000101b |     STR     r1, v5
+217 0D9h | 40C6h 0100000011000110b |     LDR     r0, v6
+218 0DAh | 8900h 1000100100000000b |     ASR     r0
+219 0DBh | 42D0h 0100001011010000b |     LDR     r1, r0      ; Save for sub op in a few lines
+220 0DCh | 44C7h 0100010011000111b |     LDR     r2, v7
+221 0DDh | 8D00h 1000110100000000b |     ASR     r2
+222 0DEh | 00D2h 0000000011010010b |     ADD     r0, r2      ; (a + b) / 2
+223 0DFh | 14D1h 0001010011010001b |     SUB     r2, r1      ; (b - a) / 2
+224 0E0h | 8900h 1000100100000000b |     ASR     r0          ; (a + b) / 4
+225 0E1h | 8D00h 1000110100000000b |     ASR     r2          ; (b - a) / 4
+226 0E2h | 48C7h 0100100011000111b |     STR     r0, v7      ; Save result back to source
+227 0E3h | 4CC6h 0100110011000110b |     STR     r2, v6
+228 0E4h |                         | 
+228 0E4h |                         | STAGE4: ; Lifting, this time scaled from earlier macro calls.
+228 0E4h |                         | 
+228 0E4h |                         |     ; x0 = x0 + x1
+228 0E4h | 40C0h 0100000011000000b |     LDR     r0, v0
+229 0E5h | 00C1h 0000000011000001b |     ADD     r0, v1
+230 0E6h | 48C0h 0100100011000000b |     STR     r0, v0              ; x0 = x0 + x1
+231 0E7h |                         | 
+231 0E7h |                         |     ; x1 = (1/2)*x0 - x1
+231 0E7h | 8900h 1000100100000000b |     ASR     r0
+232 0E8h | 10C1h 0001000011000001b |     SUB     r0, v1
+233 0E9h | 48C1h 0100100011000001b |     STR     r0, v1              ; x1 = (1/2)*x0 - x1
+234 0EAh |                         | 
+234 0EAh |                         |     ; x2 = (1/2)*x3 - x2
+234 0EAh | 40C3h 0100000011000011b |     LDR     r0, v3
+235 0EBh | 8900h 1000100100000000b |     ASR     r0
+236 0ECh | 10C2h 0001000011000010b |     SUB     r0, v2
+237 0EDh | 48C2h 0100100011000010b |     STR     r0, v2              ; x2 = (1/2)*x3 - v2
+238 0EEh |                         |  
+238 0EEh |                         |     ; x3 = x3 - (3/8)*x2
+238 0EEh | 42C2h 0100001011000010b |     LDR     r1, v2
+239 0EFh | 8B00h 1000101100000000b |     ASR     r1
+240 0F0h | 8B00h 1000101100000000b |     ASR     r1
+241 0F1h | 40D1h 0100000011010001b |     LDR     r0, r1              ; (1/4)*x2
+242 0F2h | 8B00h 1000101100000000b |     ASR     r1
+243 0F3h | 00D1h 0000000011010001b |     ADD     r0, r1              ; (3/8)*x2
+244 0F4h | 42C3h 0100001011000011b |     LDR     r1, v3
+245 0F5h | 12D0h 0001001011010000b |     SUB     r1, r0
+246 0F6h | 4AC3h 0100101011000011b |     STR     r1, v3              ; x3 = x3 - (3/8)*x2
+247 0F7h |                         | 
+247 0F7h |                         |     ; x4 = (3/16)*x7 - x4
+247 0F7h | 42C7h 0100001011000111b |     LDR     r1, v7
+248 0F8h | 8B00h 1000101100000000b |     ASR     r1
+249 0F9h | 8B00h 1000101100000000b |     ASR     r1
+250 0FAh | 8B00h 1000101100000000b |     ASR     r1
+251 0FBh | 40D1h 0100000011010001b |     LDR     r0, r1              ; (1/8)*x7
+252 0FCh | 8B00h 1000101100000000b |     ASR     r1
+253 0FDh | 00D1h 0000000011010001b |     ADD     r0, r1              ; (3/16)*x7
+254 0FEh | 10C4h 0001000011000100b |     SUB     r0, v4
+255 0FFh | 48C4h 0100100011000100b |     STR     r0, v4              ; x4 = (3/16)*x7 - x4
+256 100h |                         | 
+256 100h |                         |     ; x7 = x7 - (1/4)*x4
+256 100h | 40C4h 0100000011000100b |     LDR     r0, v4
+257 101h | 8900h 1000100100000000b |     ASR     r0
+258 102h | 8900h 1000100100000000b |     ASR     r0                  ; (1/4)*x4
+259 103h | 42C7h 0100001011000111b |     LDR     r1, v7
+260 104h | 12D0h 0001001011010000b |     SUB     r1, r0
+261 105h | 4AC7h 0100101011000111b |     STR     r1, v7              ; x7 = x7 - (1/4)*x4
+262 106h |                         | 
+262 106h |                         |     ; x5 = x5 + (7/8)*x6
+262 106h | 42C6h 0100001011000110b |     LDR     r1, v6
+263 107h | 8B00h 1000101100000000b |     ASR     r1
+264 108h | 40D1h 0100000011010001b |     LDR     r0, r1              ; (1/2)*x6
+265 109h | 8B00h 1000101100000000b |     ASR     r1
+266 10Ah | 00D1h 0000000011010001b |     ADD     r0, r1              ; (3/4)*x6
+267 10Bh | 8B00h 1000101100000000b |     ASR     r1
+268 10Ch | 00D1h 0000000011010001b |     ADD     r0, r1              ; (7/8)*x6
+269 10Dh | 00C5h 0000000011000101b |     ADD     r0, v5
+270 10Eh | 48C5h 0100100011000101b |     STR     r0, v5              ; x5 = x5 + (7/8)*x6
+271 10Fh |                         | 
+271 10Fh |                         |     ; x6 = x6 - (1/2)*x5
+271 10Fh | 42C5h 0100001011000101b |     LDR     r1, v5
+272 110h | 8B00h 1000101100000000b |     ASR     r1
+273 111h | 40C6h 0100000011000110b |     LDR     r0, v6
+274 112h | 10D1h 0001000011010001b |     SUB     r0, r1
+275 113h | 48C6h 0100100011000110b |     STR     r0, v6              ;x6 = x6 - (1/2)*x5
+276 114h |                         | 
+276 114h |                         | DCT_END:
+276 114h |                         |     
+276 114h | 8210h 1000001000010000b |     BX
+277 115h |                         |  
+277 115h |                         | ;-------------------------------------------------------------------------------
+277 115h |                         | ; Load row
+277 115h |                         | ;
+277 115h |                         | ; Description:
+277 115h |                         | ;
+277 115h |                         | ;   Loads a given row of pixels into v memory for easy addressing.
+277 115h |                         | ;
+277 115h |                         | ; Inputs:
+277 115h |                         | ;   
+277 115h |                         | ;   r0      The address of the start of the row to be loaded.
+277 115h |                         | ;
+277 115h |                         | ; Outputs:
+277 115h |                         | ;
+277 115h |                         | ;   The pixel data for the row is copied to v0..v7.
+277 115h |                         | ;
+277 115h |                         | ; Registers Modified:
+277 115h |                         | ;
+277 115h |                         | ;   r1
+277 115h |                         | ;-------------------------------------------------------------------------------
+277 115h |                         | 
+277 115h |                         | LOAD_ROW:
+277 115h |                         | 
+277 115h | 42F0h 0100001011110000b |     LDR     r1, [r0]
+278 116h | 4AC0h 0100101011000000b |     STR     r1, v0
+279 117h | 0101h 0000000100000001b |     ADD     r0, 1
+280 118h | 42F0h 0100001011110000b |     LDR     r1, [r0]
+281 119h | 4AC1h 0100101011000001b |     STR     r1, v1
+282 11Ah | 0101h 0000000100000001b |     ADD     r0, 1
+283 11Bh | 42F0h 0100001011110000b |     LDR     r1, [r0]
+284 11Ch | 4AC2h 0100101011000010b |     STR     r1, v2
+285 11Dh | 0101h 0000000100000001b |     ADD     r0, 1
+286 11Eh | 42F0h 0100001011110000b |     LDR     r1, [r0]
+287 11Fh | 4AC3h 0100101011000011b |     STR     r1, v3
+288 120h | 0101h 0000000100000001b |     ADD     r0, 1
+289 121h | 42F0h 0100001011110000b |     LDR     r1, [r0]
+290 122h | 4AC4h 0100101011000100b |     STR     r1, v4
+291 123h | 0101h 0000000100000001b |     ADD     r0, 1
+292 124h | 42F0h 0100001011110000b |     LDR     r1, [r0]
+293 125h | 4AC5h 0100101011000101b |     STR     r1, v5
+294 126h | 0101h 0000000100000001b |     ADD     r0, 1
+295 127h | 42F0h 0100001011110000b |     LDR     r1, [r0]
+296 128h | 4AC6h 0100101011000110b |     STR     r1, v6
+297 129h | 0101h 0000000100000001b |     ADD     r0, 1
+298 12Ah | 42F0h 0100001011110000b |     LDR     r1, [r0]
+299 12Bh | 4AC7h 0100101011000111b |     STR     r1, v7
+300 12Ch | 1107h 0001000100000111b |     SUB     r0, 7
+301 12Dh | 8210h 1000001000010000b |     BX 
+302 12Eh |                         |       
+302 12Eh |                         | ;-------------------------------------------------------------------------------
+302 12Eh |                         | ; Store row
+302 12Eh |                         | ;
+302 12Eh |                         | ; Description:
+302 12Eh |                         | ;
+302 12Eh |                         | ;   Stores a given row of pixels into v memory for easy addressing.
+302 12Eh |                         | ;
+302 12Eh |                         | ; Inputs:
+302 12Eh |                         | ;   
+302 12Eh |                         | ;   r0      The address of the start of the row to be stored.
+302 12Eh |                         | ;
+302 12Eh |                         | ; Outputs:
+302 12Eh |                         | ;
+302 12Eh |                         | ;   The pixel data for the row is copied from v0..v7.
+302 12Eh |                         | ;
+302 12Eh |                         | ; Registers Modified:
+302 12Eh |                         | ;
+302 12Eh |                         | ;   r1
+302 12Eh |                         | ;-------------------------------------------------------------------------------
+302 12Eh |                         | 
+302 12Eh |                         | STORE_ROW:
+302 12Eh |                         | 
+302 12Eh | 42C0h 0100001011000000b |     LDR     r1, v0
+303 12Fh | 4AF0h 0100101011110000b |     STR     r1, [r0]
+304 130h | 0101h 0000000100000001b |     ADD     r0, 1
+305 131h | 42C1h 0100001011000001b |     LDR     r1, v1
+306 132h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+307 133h | 0101h 0000000100000001b |     ADD     r0, 1
+308 134h | 42C2h 0100001011000010b |     LDR     r1, v2
+309 135h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+310 136h | 0101h 0000000100000001b |     ADD     r0, 1
+311 137h | 42C3h 0100001011000011b |     LDR     r1, v3
+312 138h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+313 139h | 0101h 0000000100000001b |     ADD     r0, 1
+314 13Ah | 42C4h 0100001011000100b |     LDR     r1, v4
+315 13Bh | 4AF0h 0100101011110000b |     STR     r1, [r0]
+316 13Ch | 0101h 0000000100000001b |     ADD     r0, 1
+317 13Dh | 42C5h 0100001011000101b |     LDR     r1, v5
+318 13Eh | 4AF0h 0100101011110000b |     STR     r1, [r0]
+319 13Fh | 0101h 0000000100000001b |     ADD     r0, 1
+320 140h | 42C6h 0100001011000110b |     LDR     r1, v6
+321 141h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+322 142h | 0101h 0000000100000001b |     ADD     r0, 1
+323 143h | 42C7h 0100001011000111b |     LDR     r1, v7
+324 144h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+325 145h | 1107h 0001000100000111b |     SUB     r0, 7
+326 146h | 8210h 1000001000010000b |     BX 
+327 147h |                         |  
+327 147h |                         | ;-------------------------------------------------------------------------------
+327 147h |                         | ; Load col
+327 147h |                         | ;
+327 147h |                         | ; Description:
+327 147h |                         | ;
+327 147h |                         | ;   Loads a given col of pixels into v memory for easy addressing.
+327 147h |                         | ;
+327 147h |                         | ; Inputs:
+327 147h |                         | ;   
+327 147h |                         | ;   r0      The address of the start of the col to be loaded.
+327 147h |                         | ;
+327 147h |                         | ; Outputs:
+327 147h |                         | ;
+327 147h |                         | ;   The pixel data for the col is copied to v0..v7.
+327 147h |                         | ;
+327 147h |                         | ; Registers Modified:
+327 147h |                         | ;
+327 147h |                         | ;   r1
+327 147h |                         | ;-------------------------------------------------------------------------------
+327 147h |                         | 
+327 147h |                         | LOAD_COL:
+327 147h |                         | 
+327 147h | 42F0h 0100001011110000b |     LDR     r1, [r0]
+328 148h | 4AC0h 0100101011000000b |     STR     r1, v0
+329 149h | 0108h 0000000100001000b |     ADD     r0, 8
+330 14Ah | 42F0h 0100001011110000b |     LDR     r1, [r0]
+331 14Bh | 4AC1h 0100101011000001b |     STR     r1, v1
+332 14Ch | 0108h 0000000100001000b |     ADD     r0, 8
+333 14Dh | 42F0h 0100001011110000b |     LDR     r1, [r0]
+334 14Eh | 4AC2h 0100101011000010b |     STR     r1, v2
+335 14Fh | 0108h 0000000100001000b |     ADD     r0, 8
+336 150h | 42F0h 0100001011110000b |     LDR     r1, [r0]
+337 151h | 4AC3h 0100101011000011b |     STR     r1, v3
+338 152h | 0108h 0000000100001000b |     ADD     r0, 8
+339 153h | 42F0h 0100001011110000b |     LDR     r1, [r0]
+340 154h | 4AC4h 0100101011000100b |     STR     r1, v4
+341 155h | 0108h 0000000100001000b |     ADD     r0, 8
+342 156h | 42F0h 0100001011110000b |     LDR     r1, [r0]
+343 157h | 4AC5h 0100101011000101b |     STR     r1, v5
+344 158h | 0108h 0000000100001000b |     ADD     r0, 8
+345 159h | 42F0h 0100001011110000b |     LDR     r1, [r0]
+346 15Ah | 4AC6h 0100101011000110b |     STR     r1, v6
+347 15Bh | 0108h 0000000100001000b |     ADD     r0, 8
+348 15Ch | 42F0h 0100001011110000b |     LDR     r1, [r0]
+349 15Dh | 4AC7h 0100101011000111b |     STR     r1, v7
+350 15Eh | 1138h 0001000100111000b |     SUB     r0, 56
+351 15Fh | 8210h 1000001000010000b |     BX 
+352 160h |                         |       
+352 160h |                         | ;-------------------------------------------------------------------------------
+352 160h |                         | ; Store col
+352 160h |                         | ;
+352 160h |                         | ; Description:
+352 160h |                         | ;
+352 160h |                         | ;   Stores a given col of pixels into v memory for easy addressing.
+352 160h |                         | ;
+352 160h |                         | ; Inputs:
+352 160h |                         | ;   
+352 160h |                         | ;   r0      The address of the start of the col to be stored.
+352 160h |                         | ;
+352 160h |                         | ; Outputs:
+352 160h |                         | ;
+352 160h |                         | ;   The pixel data for the col is copied from v0..v7.
+352 160h |                         | ;
+352 160h |                         | ; Registers Modified:
+352 160h |                         | ;
+352 160h |                         | ;   r1
+352 160h |                         | ;-------------------------------------------------------------------------------
+352 160h |                         | 
+352 160h |                         | STORE_COL:
+352 160h |                         | 
+352 160h | 42C0h 0100001011000000b |     LDR     r1, v0
+353 161h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+354 162h | 0108h 0000000100001000b |     ADD     r0, 8
+355 163h | 42C1h 0100001011000001b |     LDR     r1, v1
+356 164h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+357 165h | 0108h 0000000100001000b |     ADD     r0, 8
+358 166h | 42C2h 0100001011000010b |     LDR     r1, v2
+359 167h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+360 168h | 0108h 0000000100001000b |     ADD     r0, 8
+361 169h | 42C3h 0100001011000011b |     LDR     r1, v3
+362 16Ah | 4AF0h 0100101011110000b |     STR     r1, [r0]
+363 16Bh | 0108h 0000000100001000b |     ADD     r0, 8
+364 16Ch | 42C4h 0100001011000100b |     LDR     r1, v4
+365 16Dh | 4AF0h 0100101011110000b |     STR     r1, [r0]
+366 16Eh | 0108h 0000000100001000b |     ADD     r0, 8
+367 16Fh | 42C5h 0100001011000101b |     LDR     r1, v5
+368 170h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+369 171h | 0108h 0000000100001000b |     ADD     r0, 8
+370 172h | 42C6h 0100001011000110b |     LDR     r1, v6
+371 173h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+372 174h | 0108h 0000000100001000b |     ADD     r0, 8
+373 175h | 42C7h 0100001011000111b |     LDR     r1, v7
+374 176h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+375 177h | 1138h 0001000100111000b |     SUB     r0, 56
+376 178h | 8210h 1000001000010000b |     BX 
+377 179h |                         |     
+377 179h |                         | ;-------------------------------------------------------------------------------
+377 179h |                         | ; Output_Data_Block
+377 179h |                         | ;
+377 179h |                         | ; Description:
+377 179h |                         | ;
+377 179h |                         | ;   The output function, which dumps 64 bytes of data out through the column
+377 179h |                         | ;   data bus.  This can be called with different starting addresses to determine
+377 179h |                         | ;   whether X, Y, Z or some other block is output.
+377 179h |                         | ;
+377 179h |                         | ; Inputs:
+377 179h |                         | ;
+377 179h |                         | ;   r0          The address to begin outputing.  The last byte will be output
+377 179h |                         | ;               from address r0+63.
+377 179h |                         | ;
+377 179h |                         | ; Outputs:
+377 179h |                         | ;
+377 179h |                         | ;   -           64 bytes for each NP on column data bus.
+377 179h |                         | ;
+377 179h |                         | ; Registers Modified:
+377 179h |                         | ;
+377 179h |                         | ;   r0, r1
+377 179h |                         | ;-------------------------------------------------------------------------------
+377 179h |                         | 
+377 179h |                         | Output_Data_Block:
+377 179h |                         | 
+377 179h | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address.
+378 17Ah | 0340h 0000001101000000b |     ADD     r1, 64      
+379 17Bh |                         | 
+379 17Bh |                         | OUTPUT_DATA_BLOCK_LOOP:
+379 17Bh |                         | 
+379 17Bh | A0F0h 1010000011110000b |     OUT     [r0], 0          ; Row 0
+380 17Ch | A2F0h 1010001011110000b |     OUT     [r0], 1          ; Row 1
+381 17Dh | A4F0h 1010010011110000b |     OUT     [r0], 2          ; Row 2
+382 17Eh | A6F0h 1010011011110000b |     OUT     [r0], 3          ; Row 3
+383 17Fh | A8F0h 1010100011110000b |     OUT     [r0], 4          ; Row 4
+384 180h | AAF0h 1010101011110000b |     OUT     [r0], 5          ; Row 5
+385 181h | ACF0h 1010110011110000b |     OUT     [r0], 6          ; Row 6
+386 182h | AEF0h 1010111011110000b |     OUT     [r0], 7          ; Row 7
+387 183h |                         |     
+387 183h | 0101h 0000000100000001b |     ADD     r0, 1
+388 184h | 38D1h 0011100011010001b |     CMP     r0, r1
+389 185h | D7B1h 1101011110110001b |     BNE     OUTPUT_DATA_BLOCK_LOOP
+390 186h | 8210h 1000001000010000b |     BX 

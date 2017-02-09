@@ -1,0 +1,250 @@
+; Define new instruction labels to make the code intuitive to read.
+
+#define ROW_MASK            11110000b   ; The row bits.
+#define COL_MASK            00001111b   ; The column bits.
+
+#define START_OF_X          00000000b   ; Starting address of X RAM.
+#define START_OF_Y          01000000b   ; Starting address of Y RAM.
+#define START_OF_Z          10000000b   ; Starting address of X RAM.
+#define START_OF_V          11000000b   ; Starting address of V RAM.
+ 
+#define TRUE                 1          ; True pattern
+#define FALSE                0          ; False pattern
+#define NULL                -1          ; Null pattern
+
+#define NUM_PIXELS          64          ; The number of pixels in the NP.
+
+START:
+
+    LDR     r0, FALSE
+    LDR     r1, TRUE
+ 
+;-------------------------------------------------------------------------------
+; BEQ
+;-------------------------------------------------------------------------------
+ 
+TEST_BEQ:
+
+    LDR     r2, 45
+    CMP     r2, 45
+    BEQ     TEST_BPL
+    B       FAIL
+               
+;-------------------------------------------------------------------------------
+; BPL, BMI
+;-------------------------------------------------------------------------------
+ 
+TEST_BPL:
+
+    LDR     r2, 84
+    CMP     r2, 0
+    BPL     TEST_BMI
+    B       FAIL
+             
+TEST_BMI:
+
+    LDR     r2, -2
+    CMP     r2, 0
+    BMI     TEST_BLO
+    B       FAIL
+             
+;-------------------------------------------------------------------------------
+; BLO, BHI
+;-------------------------------------------------------------------------------
+ 
+TEST_BLO:
+
+    LDR     r2, 3
+    CMP     r2, 255
+    BLO     TEST_BHI
+    B       FAIL
+                     
+TEST_BHI:
+
+    LDR     r2, 192
+    CMP     r2, 30
+    BHI     TEST_BLS_EQ
+    B       FAIL
+              
+;-------------------------------------------------------------------------------
+; BLS, BHS
+;-------------------------------------------------------------------------------
+                      
+TEST_BLS_EQ:
+
+    LDR     r2, 112
+    CMP     r2, 112
+    BLS     TEST_BLS_LO
+    B       FAIL
+                     
+TEST_BLS_LO:
+
+    LDR     r2, 48 
+    CMP     r2, 49 
+    BLS     TEST_BHS_EQ
+    B       FAIL
+                     
+TEST_BHS_EQ:
+
+    LDR     r2, 255
+    CMP     r2, 255
+    BHS     TEST_BHS_HI
+    B       FAIL
+                    
+TEST_BHS_HI:
+
+    LDR     r2, 1
+    CMP     r2, 0
+    BHS     TEST_BGT_NN
+    B       FAIL
+
+;-------------------------------------------------------------------------------
+; BGT
+;-------------------------------------------------------------------------------
+                       
+TEST_BGT_NN:
+
+    LDR     r2, -45
+    CMP     r2, -128
+    BGT     TEST_BGT_PN
+    B       FAIL
+                        
+TEST_BGT_PN:
+
+    LDR     r2, 5
+    CMP     r2, -3
+    BGT     TEST_BGT_PP
+    B       FAIL
+                       
+TEST_BGT_PP:
+
+    LDR     r2, 127
+    CMP     r2, 126
+    BGT     TEST_BLT_NN
+    B       FAIL
+
+;-------------------------------------------------------------------------------
+; BLT
+;-------------------------------------------------------------------------------
+                        
+TEST_BLT_NN:
+
+    LDR     r2, -45
+    CMP     r2, -7
+    BLT     TEST_BLT_PN
+    B       FAIL       
+
+TEST_BLT_PN:
+
+    LDR     r2, -128
+    CMP     r2, 9
+    BLT     TEST_BLT_PP
+    B       FAIL       
+
+TEST_BLT_PP:
+
+    LDR     r2, 4
+    CMP     r2, 120
+    BLT     TEST_BGE_EQ_NN
+    B       FAIL
+ 
+;-------------------------------------------------------------------------------
+; BGE with A = B
+;-------------------------------------------------------------------------------
+                          
+TEST_BGE_EQ_NN:
+
+    LDR     r2, -33
+    CMP     r2, -33
+    BGE     TEST_BGE_EQ_PP
+    B       FAIL
+                       
+TEST_BGE_EQ_PP:
+
+    LDR     r2, 67
+    CMP     r2, 67
+    BGE     TEST_BGE_GT_NN
+    B       FAIL
+                          
+;-------------------------------------------------------------------------------
+; BGE with A > B
+;-------------------------------------------------------------------------------
+                             
+TEST_BGE_GT_NN:
+
+    LDR     r2, -127
+    CMP     r2, -128
+    BGE     TEST_BGE_GT_PN
+    B       FAIL
+                           
+TEST_BGE_GT_PN:
+
+    LDR     r2, 54
+    CMP     r2, -54
+    BGE     TEST_BGE_GT_PP
+    B       FAIL
+                           
+TEST_BGE_GT_PP:
+
+    LDR     r2, 88
+    CMP     r2, 8
+    BGE     TEST_BLE_EQ_NN
+    B       FAIL
+                           
+;-------------------------------------------------------------------------------
+; BLE with A = B
+;-------------------------------------------------------------------------------
+                          
+              
+TEST_BLE_EQ_NN:
+
+    LDR     r2, -68
+    CMP     r2, -68
+    BLE     TEST_BLE_EQ_PP
+    B       FAIL
+              
+TEST_BLE_EQ_PP:
+
+    LDR     r2, 76
+    CMP     r2, 76
+    BLE     TEST_BLE_LT_NN
+    B       FAIL
+               
+;-------------------------------------------------------------------------------
+; BLE with A < B
+;-------------------------------------------------------------------------------
+                             
+TEST_BLE_LT_NN:
+
+    LDR     r2, -2
+    CMP     r2, -1
+    BLE     TEST_BLE_LT_PN
+    B       FAIL
+ 
+                          
+TEST_BLE_LT_PN:
+
+    LDR     r2, -3
+    CMP     r2, 127
+    BLE     TEST_BLE_LT_PP
+    B       FAIL
+ 
+                          
+TEST_BLE_LT_PP:
+
+    LDR     r2, 25
+    CMP     r2, 127
+    BLE     END
+    B       FAIL
+                
+;-------------------------------------------------------------------------------
+; Final states.  Infinite loop on failure or RST on success.
+;-------------------------------------------------------------------------------
+     
+FAIL:
+
+    B       FAIL
+        
+END:
+
+    RST

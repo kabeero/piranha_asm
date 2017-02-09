@@ -1,0 +1,17 @@
+; Tests the ability to load different values into each register.
+
+START:
+
+    LDR     r0, a0h
+    LDR     r1, b1h
+    LDR     r2, c2h
+    LDR     r3, d3h
+
+    OUT     r0, 7
+    OUT     r1, 7
+    OUT     r2, 7
+    OUT     r3, 7
+ 
+END:
+
+    RST

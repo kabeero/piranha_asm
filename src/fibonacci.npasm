@@ -1,0 +1,81 @@
+; fibonacci.asm
+;
+; Test program which tests the BL  /BX  functionality of the processor.
+
+#define SP              r3              ; The stack pointer
+#define START_OF_V      11000000b       ; Starting address of V RAM.
+
+FIB_INIT:
+
+    LDR     r0, 7           ; Find the r0th number in the fibonacci sequence.
+    LDR     SP, START_OF_V  ; Set up the stack pointer at the start of V RAM.
+    BL      FIBONACCI
+    OUT     r1, 0           ; Output the result for the first row.
+ 
+FIB_END:
+
+    RST
+ 
+;-------------------------------------------------------------------------------
+;
+; Description:
+
+;       Calculates the nth fibonnaci number through recursion.
+;
+; Input:
+; 
+;       r0 - The index of the desired fibonacci number.
+;
+; Output:
+;
+;       r1 - The fibonacci number corresponding to the input index.
+; 
+; Modified Registers:
+;
+;       r0, r1, r2
+; 
+;-------------------------------------------------------------------------------
+
+FIBONACCI:
+
+    ; Check to see if either base case is achieved (n = 0, n = 1)
+    CMP     r0, 0
+    BEQ     FIB_BASE_CASE_0
+    CMP     r0, 1
+    BEQ     FIB_BASE_CASE_1
+
+FIB_RECURSIVE:
+
+    ; Since this is not the base case, perform a recursive call using n-1 and
+    ; n-2 and return the sum of the results.
+
+    SUB     r0, 1           ; Prepare for recursive call.
+    BL      FIBONACCI
+
+    STR     r1, [SP]        ; Save the first result on the stack.
+    ADD     SP, 1           ; Update the stack pointer.
+
+    SUB     r0, 1           ; Prepare for second recursive call.
+    BL      FIBONACCI
+
+    SUB     SP, 1           ; Retrieve fib(n-1) from the stack.
+    LDR     r2, [SP]
+
+    ADD     r1, r2          ; r1 = fib(n-1) + fib(n-2) = fib(n)
+    ADD     r0, 2           ; Restore original index value
+    B       FIB_RET
+
+FIB_BASE_CASE_0:
+
+    LDR     r1, 0
+    B       FIB_RET
+
+FIB_BASE_CASE_1:
+
+    LDR     r1, 1
+    B       FIB_RET
+
+FIB_RET:
+
+    BX 
+

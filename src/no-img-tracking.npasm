@@ -1,0 +1,606 @@
+;-------------------------------------------------------------------------------
+; tracking.npasm
+;
+; Tracks an individual target across the imaging area.  It performs frame 
+; differencing followed by a centroid-calculation to find the object 
+; coordinates.  It assumes the object moves very little between frames.
+;
+; The algorithm works by first binarizing the image into a black and white 
+; bitmap.  It then generates two histograms, one for the number of motion pixels
+; in each column of the image and a second for each row of the image.  The total
+; number of motion pixels in the image is calculated.  The centroid for the 
+; columns/rows is determined by integrating the column and row histograms until 
+; the point where half the total motion pixels have been accounted for.  This
+; corresponds to a sort of center of mass, or centroid, of the motion.  The
+; coordinates are saved and transmitted.
+;-------------------------------------------------------------------------------
+
+; Define new instruction labels to make the code intuitive to read.
+
+#define PXL_ROW_MASK    00111000b   ; The row bits for pixels
+#define PXL_COL_MASK    00000111b   ; The column bits for pixels
+
+#define PXL_EDGE_N      00000000b   ; Matches pixels on N edge of NP
+#define PXL_EDGE_S      00111000b   ; Matches pixels on S edge of NP
+#define PXL_EDGE_W      00000000b   ; Matches pixels on W edge of NP
+#define PXL_EDGE_E      00000111b   ; Matches pixels on E edge of NP
+ 
+#define START_OF_X      00000000b   ; Starting address of X RAM.
+#define START_OF_Y      01000000b   ; Starting address of Y RAM.
+#define START_OF_Z      10000000b   ; Starting address of X RAM.
+#define START_OF_V      11000000b   ; Starting address of V RAM.
+ 
+#define NUM_PIXELS      64          ; The number of pixels in the NP.
+#define MASK_AF         01000000b   ; Mask for ADC active flag
+
+; Algorithm constants.
+
+#define THRESHOLD       16          ; Min frame diff. before detection
+
+; Algorithm variables.
+ 
+#define index           r0          ; The current pixel index 0..63
+#define pxlr            r2          ; The current pixel row 0..7
+#define pxlc            r3          ; The current pixel column 0..7
+                           
+#define NULL_BB         0           ; Indicates no bounding box found
+
+#define xmin            z[0]        ; Motion bounding box NW corner x
+#define ymin            z[1]        ; Motion bounding box NW corner y
+#define xmax            z[2]        ; Motion bounding box SE corner x
+#define ymax            z[3]        ; Motion bounding box SE corner y
+             
+#define xmin_in         z[4]        ; Motion bounding box NW corner x
+#define ymin_in         z[5]        ; Motion bounding box NW corner y
+#define xmax_in         z[6]        ; Motion bounding box SE corner x
+#define ymax_in         z[7]        ; Motion bounding box SE corner y
+
+#define coord_pointer   v0          ; Address to save coordinate pairs
+             
+;-------------------------------------------------------------------------------
+      
+; Zeroes all of Z memory where the data is stored.  This isn't required,
+; but it makes the output easier to debug.
+         
+CLEAR_HIST:
+
+CLEAR_HIST_INIT:
+
+    LDR     r0, START_OF_Z
+    LDR     r1, 0
+
+CLEAR_HIST_LOOP:
+
+    STR     r1, [r0]
+    ADD     r0, 1
+    CMP     r0, {START_OF_Z + NUM_PIXELS}
+    BLO     CLEAR_HIST_LOOP
+
+INIT_COORD_PTR:
+                                          
+    LDR     r0, {START_OF_Z + 8} ; Store coordinates in Z, skipping min/max vars
+    STR     r0, coord_pointer
+
+;-------------------------------------------------------------------------------
+ 
+START:
+     
+;; Set the image memory to a consistent value to make it clearer when pixels are 
+;; not triggering properly.
+;                                          
+;CLEAN_SLATE_INIT:
+; 
+;    LDR     r0, START_OF_X  ; Overwrite x ram with constant (note this is in gray code)
+;    LDR     r2, 00h      
+;    LDR     r1, r0          ; Calculate the final address
+;    ADD     r1, 64      
+;
+;CLEAN_SLATE_LOOP:
+;
+;    STR     r2, [r0]
+;    ADD     r0, 1
+;    CMP     r0, r1
+;    BLO     CLEAN_SLATE_LOOP
+; 
+;ACQUIRE_IMAGE:
+;
+;    IMG                     ; Acquire a new image from the ADCs
+;
+;WAIT_FOR_ADC:
+;
+;    ; At this point, the FSM for the ADC is running.  Read the status register
+;    ; to check if the conversion is finished. (Note: very inefficient)
+;
+;    LDR     r0, SR          ; Load the status register
+;    AND     r0, MASK_AF     ; Check if the ADC is active
+;    BNZ     WAIT_FOR_ADC    ; Loop while the ADC is converting
+;     
+;CONVERT_TO_BINARY:
+;    
+;    LDR     r0, START_OF_X  ; Start of image
+;    LDR     r1, r0
+;    ADD     r1, NUM_PIXELS  ; End of image
+;
+;CONVERT_TO_BINARY_LOOP:
+;
+;    LDR     r2, [r0]    ; Convert gray to binary code
+;    GTB     r2
+;    STR     r2, [r0]
+;    ADD     r0, 1
+;    CMP     r0, r1
+;    BNE     CONVERT_TO_BINARY_LOOP
+; 
+;OUTPUT_ORIGINAL_IMAGE:
+;
+;    LDR     r0, START_OF_X
+;    BL      Output_Data_Block   ; Output the image
+     
+CONVERT_TO_SIGNED:
+
+CONVERT_TO_SIGNED_INIT:
+
+    LDR     r0, START_OF_X
+
+CONVERT_TO_SIGNED_LOOP:
+
+    LDR     r1, [r0]
+    LSR     r1          ; Max value is +127 now
+    STR     r1, [r0]
+    ADD     r0, 1
+    CMP     r0, NUM_PIXELS
+    BLO     CONVERT_TO_SIGNED_LOOP
+ 
+;-------------------------------------------------------------------------------
+ 
+; Iterate through every pixel in the new image (in X) and subtract the old, 
+; previous image (in Y).  The math here is signed since differences can be 
+; positive or negative.  Because of this, images are always divided by a factor 
+; of two in order to prevent overflow during math operations.  The previous 
+; frame is stored in this signed representation as well.
+ 
+FRAME_DIFFERENCE:
+
+FD_LOOP_INIT:
+ 
+    ; Store bounding box coordinates for this NP in V memory.
+
+    LDR r0, 0           ; Clear coordinates, 0 is reserved for NULL
+    STR r0, xmin
+    STR r0, ymin
+    STR r0, xmax
+    STR r0, ymax
+                                         
+    LDR index, START_OF_X      ; Initialize index variables
+                          
+FD_LOOP:
+
+    LDR     pxlc, index         ; Update row/column variables
+    AND     pxlc, PXL_COL_MASK
+    ADD     pxlc, 1             ; C/R numbered from 1-8 since 0 is NULL
+    LDR     pxlr, index
+    LSR     pxlr
+    LSR     pxlr
+    LSR     pxlr
+    ADD     pxlr, 1             ; C/R numbered from 1-8 since 0 is NULL
+
+    LDR     r1, [r0]        ; Load the new pixel value
+    ADD     r0, START_OF_Y  ; Find correspond Y pixel
+    SUB     r1, [r0]        ; signed(new) - signed(old)
+    ZPL                     ; If negative, negate to find absolute value
+        EOR     r1, FFh     ; For two's compliment, xor(x, FFh)+1 = -x
+        ADD     r1, 1
+    WAK
+    CMP     r1, THRESHOLD   ; Binarize image based on threshold
+    ZLO
+        LDR     r1, 255     ; This makes it easier to debug, but is not req'd
+        STR     r1, [r0]
+        LDR     r1, xmin    ; Check if x/y min/max variables are NULL
+        CMP     r1, 0    
+        ZNE                         ; NPs where this is the 1st detection, so
+            STR     pxlc, xmin      ;   this pixel is the min and max
+            STR     pxlr, ymin
+            STR     pxlc, xmax
+            STR     pxlr, ymax
+        WAK
+        ZEQ                         ; Execute if current values are valid
+            CMP     pxlc, xmin      ; Is this the min x encountered?
+            ZGE
+                STR     pxlc, xmin
+            WAK
+            CMP     pxlr, ymin      ; Is this the min y encountered?
+            ZGE
+                STR     pxlr, ymin
+            WAK
+            CMP     pxlc, xmax      ; Is this the max x encountered?
+            ZLE
+                STR     pxlc, xmax
+            WAK
+            CMP     pxlr, ymax      ; Is this the max y encountered?
+            ZLE
+                STR     pxlr, ymax
+            WAK
+        WAK
+    WAK
+
+FD_LOOP_UPDATE:
+
+    ADD     r0, {1 - START_OF_Y}  ; Return to the next pixel in X RAM
+    CMP     r0, NUM_PIXELS
+    BLT     FD_LOOP
+                         
+;-------------------------------------------------------------------------------
+
+COMBINE_BOUNDING_BOXES:
+     
+CBB_ROW:
+
+CBB_ROW_INIT:
+
+    LDR     r3, 7       ; Number of shifts to perform, #ROWS-1
+
+CBB_ROW_LOOP:
+
+    ; When combining bounding boxes, several cases may occur:
+    ;
+    ;   1.  Both this NP and the one downstream have NULL coordinate pairs.  In
+    ;       this case, the coordinate pairs should remain NULL
+    ;
+    ;   2.  This NP has NULL data, but the upstream NP has valid data.  In this
+    ;       case, the incoming coordinate pairs should overwrite the local ones.
+    ;
+    ;   3.  This NP has valid data, but the upstream NP does not.  In this case,
+    ;       the coordinate pairs should not be modified.
+    ;
+    ;   4.  Both this NP and the downstream NP have valid coordinate data.  Each
+    ;       coordinate pair must be compared and the more inclusive one saved.
+    ;
+    ; NOTE: When an NP is asleep, it will not write any data to memory or 
+    ;       registers, so any data that needs to be access from a sleeping
+    ;       NP through the NSWE data bus must already be loaded in r0..r3.
+
+    ; Copy incoming coordinates locally to prevent NPs from receiving 
+    ; out-of-sync data.
+
+    LDR     r0, xmin
+    LDR     r0, S
+    STR     r0, xmin_in
+
+    LDR     r0, ymin
+    LDR     r0, S
+    STR     r0, ymin_in
+
+    LDR     r0, xmax
+    LDR     r0, S
+    STR     r0, xmax_in
+
+    LDR     r0, ymax
+    LDR     r0, S
+    STR     r0, ymax_in
+
+    ; First check if the incoming BB coords are NULL.  If so, the NP will should
+    ; disregard any incoming coordinates, since they are uninitialized.  It goes
+    ; to sleep for this loop cycle.
+      
+    LDR     r0, xmin_in     ; Check if the coords are NULL in the other NP    
+    CMP     r0, NULL_BB
+    ZEQ
+ 
+        ; If this NP already found motion pixels itself, it needs to compare 
+        ; the coords of its own internal bounding box to those it receives to
+        ; create a new BB that encloses both BBs.
+
+        LDR     r0, xmin
+        CMP     r0, NULL_BB
+        ZEQ
+            ; xmin
+
+            LDR     r0, xmin_in
+            CMP     r0, xmin        ; Compare it to this NP's value
+            ZHS
+                STR     r0, xmin    ; If lower, save it as the new minimum
+            WAK
+
+            ; ymin
+
+            LDR     r0, ymin_in
+            ADD     r0, 8           ; Add offset since S NP starts 8 rows higher
+            CMP     r0, ymin        ; Compare it to this NP's value
+            ZHS
+                STR     r0, ymin    ; If lower, save it as the new minimum
+            WAK
+                  
+            ; xmax
+
+            LDR     r0, xmax_in
+            CMP     r0, xmax        ; Compare it to this NP's value
+            ZLS
+                STR     r0, xmax    ; If higher, save it as the new maximum
+            WAK
+
+            ; ymin
+             
+            LDR     r0, ymax_in
+            ADD     r0, 8           ; Add offset since S NP starts 8 rows higher
+            CMP     r0, ymax        ; Compare it to this NP's value
+            ZLS
+                STR     r0, ymax    ; If higher, save it as the new maximum
+            WAK
+        WAK  
+
+        ; Next check if this NP found any motion pixels in itself.  If not, all 
+        ; of its x/y min/max entires will be NULL/0 and it can assume the 
+        ; incoming bounding box will enclose its own, as it has none.  So, all
+        ; incoming values are accepted without comparison.
+        ;
+        ; NOTE: Since NPs with NULL values where asleep before, this CMP is 
+        ;       valid for them even though the code above does modify some NPs.
+
+        LDR     r0, xmin
+        CMP     r0, NULL_BB
+        ZNE                     ; If NULL, use incoming coordinates always
+            LDR     r0, xmin_in
+            STR     r0, xmin
+            LDR     r0, ymin_in
+            ADD     r0, 8       ; Add offset since S NP starts 8 rows higher
+            STR     r0, ymin
+            LDR     r0, xmax_in
+            STR     r0, xmax
+            LDR     r0, ymax_in
+            ADD     r0, 8       ; Add offset since S NP starts 8 rows higher
+            STR     r0, ymax
+        WAK
+    WAK
+
+CBB_ROW_LOOP_CONDITION:
+
+    SUB     r3, 1               ; Indicate an additional shift is complete
+    BNZ     CBB_ROW_LOOP
+
+;-------------------------------------------------------------------------------
+      
+CBB_COL:
+
+CBB_COL_INIT:
+
+    LDR     r3, 9       ; Number of shifts to perform, #COLS-1
+
+CBB_COL_LOOP:
+
+    ; When combining bounding boxes, several cases may occur:
+    ;
+    ;   1.  Both this NP and the one downstream have NULL coordinate pairs.  In
+    ;       this case, the coordinate pairs should remain NULL
+    ;
+    ;   2.  This NP has NULL data, but the upstream NP has valid data.  In this
+    ;       case, the incoming coordinate pairs should overwrite the local ones.
+    ;
+    ;   3.  This NP has valid data, but the upstream NP does not.  In this case,
+    ;       the coordinate pairs should not be modified.
+    ;
+    ;   4.  Both this NP and the downstream NP have valid coordinate data.  Each
+    ;       coordinate pair must be compared and the more inclusive one saved.
+    ;
+    ; NOTE: When an NP is asleep, it will not write any data to memory or 
+    ;       registers, so any data that needs to be access from a sleeping
+    ;       NP through the NSWE data bus must already be loaded in r0..r3.
+
+    ; Copy incoming coordinates locally to prevent NPs from receiving 
+    ; out-of-sync data.
+
+    LDR     r0, xmin
+    LDR     r0, E
+    STR     r0, xmin_in
+
+    LDR     r0, ymin
+    LDR     r0, E
+    STR     r0, ymin_in
+
+    LDR     r0, xmax
+    LDR     r0, E
+    STR     r0, xmax_in
+
+    LDR     r0, ymax
+    LDR     r0, E
+    STR     r0, ymax_in
+
+    ; First check if the incoming BB coords are NULL.  If so, the NP will should
+    ; disregard any incoming coordinates, since they are uninitialized.  It goes
+    ; to sleep for this loop cycle.
+      
+    LDR     r0, xmin_in     ; Check if the coords are NULL in the other NP    
+    CMP     r0, NULL_BB
+    ZEQ
+ 
+        ; If this NP already found motion pixels itself, it needs to compare 
+        ; the coords of its own internal bounding box to those it receives to
+        ; create a new BB that encloses both BBs.
+
+        LDR     r0, xmin
+        CMP     r0, NULL_BB
+        ZEQ
+            ; xmin
+
+            LDR     r0, xmin_in
+            ADD     r0, 8           ; Add offset since E NP starts 8 cols higher
+            CMP     r0, xmin        ; Compare it to this NP's value
+            ZHS
+                STR     r0, xmin    ; If lower, save it as the new minimum
+            WAK
+
+            ; ymin
+
+            LDR     r0, ymin_in
+            CMP     r0, ymin        ; Compare it to this NP's value
+            ZHS
+                STR     r0, ymin    ; If lower, save it as the new minimum
+            WAK
+                  
+            ; xmax
+
+            LDR     r0, xmax_in
+            ADD     r0, 8           ; Add offset since E NP starts 8 cols higher
+            CMP     r0, xmax        ; Compare it to this NP's value
+            ZLS
+                STR     r0, xmax    ; If higher, save it as the new maximum
+            WAK
+
+            ; ymin
+             
+            LDR     r0, ymax_in
+            CMP     r0, ymax        ; Compare it to this NP's value
+            ZLS
+                STR     r0, ymax    ; If higher, save it as the new maximum
+            WAK
+        WAK  
+
+        ; Next check if this NP found any motion pixels in itself.  If not, all 
+        ; of its x/y min/max entires will be NULL/0 and it can assume the 
+        ; incoming bounding box will enclose its own, as it has none.  So, all
+        ; incoming values are accepted without comparison.
+        ;
+        ; NOTE: Since NPs with NULL values where asleep before, this CMP is 
+        ;       valid for them even though the code above does modify some NPs.
+
+        LDR     r0, xmin
+        CMP     r0, NULL_BB
+        ZNE                     ; If NULL, use incoming coordinates always
+            LDR     r0, xmin_in
+            ADD     r0, 8       ; Add offset since E NP starts 8 cols higher
+            STR     r0, xmin
+            LDR     r0, ymin_in
+            STR     r0, ymin
+            LDR     r0, xmax_in
+            ADD     r0, 8       ; Add offset since E NP starts 8 cols higher
+            STR     r0, xmax
+            LDR     r0, ymax_in
+            STR     r0, ymax
+        WAK
+    WAK
+
+CBB_COL_LOOP_CONDITION:
+
+    SUB     r3, 1               ; Indicate an additional shift is complete
+    BNZ     CBB_COL_LOOP
+         
+;-------------------------------------------------------------------------------
+
+FIND_BB_CENTER:
+
+    ; At this point, the (0,0) NP has collected and compared all of the 
+    ; individual NP bounding boxes and found the smallest bounding box that 
+    ; enclosed all of them.  The tracking algorithm assumes the target is at the
+    ; center of this bounding box, which encloses all motion in the frame.  The 
+    ; algorithm finds the center of this box, which roughly corresponds to the 
+    ; location of the tracked object.  In reality, it lags behind the actual
+    ; object location since it is actually tracking motion deltas between 
+    ; frames.
+
+    LDR     r0, RCR
+    CMP     r0, 00h         ; Check if this is the origin NP
+    ZNE                     ; Sleep all other NPs at this point.
+
+        ; Restrict to writing in Z memory (to keep the code from completely 
+        ; exploding).  Note that this will collide with the storage locations
+        ; for x/y min/max values, but shouldn't break the code otherwise.
+
+        LDR     r1, coord_pointer
+        AND     r1, 00111111b       ; Extract pixel addrses
+        ADD     r1, START_OF_Z      
+
+        LDR     r0, xmin    ; Find the center x coordinate
+        ADD     r0, xmax
+        LSR     r0
+        STR     r0, [r1]    ; Save the result in z memory
+        ADD     r1, 1       ; Move to next byte
+        LDR     r0, ymin    ; Find the center y coordinate
+        ADD     r0, ymax
+        LSR     r0
+        STR     r0, [r1]    ; Save the result in z memory
+        ADD     r1, 1       ; Move to next byte
+
+        STR     r1, coord_pointer
+    WAK
+
+             
+;-------------------------------------------------------------------------------
+ 
+;------------------------------------------------------------------------------- 
+;-------------------------------------------------------------------------------
+
+;DEBUG:
+;          
+;;-------------------------------------------------------------------------------
+;
+;    ;LDR     r0, START_OF_Y
+;    ;BL      Output_Data_Block
+;             
+;    LDR     r0, START_OF_Z
+;    BL      Output_Data_Block
+;
+;;-------------------------------------------------------------------------------
+;
+;COPY_IMAGE:
+;
+;COPY_IMAGE_INIT:
+;
+;    LDR     r0, START_OF_X
+;    LDR     r1, START_OF_Y
+;
+;COPY_IMAGE_LOOP:
+;
+;    LDR     r2, [r0]
+;    STR     r2, [r1]
+;    ADD     r0, 1
+;    ADD     r1, 1
+;    CMP     r0, NUM_PIXELS
+;    BLO     COPY_IMAGE_LOOP
+
+;------------------------------------------------------------------------------- 
+
+    B       START
+
+
+
+;-------------------------------------------------------------------------------
+; Output_Data_Block
+;
+; Description:
+;
+;   The output function, which dumps 64 bytes of data out through the column
+;   data bus.  This can be called with different starting addresses to determine
+;   whether X, Y, Z or some other block is output.
+;
+; Inputs:
+;
+;   r0          The address to begin outputing.  The last byte will be output
+;               from address r0+63.
+;
+; Outputs:
+;
+;   -           64 bytes for each NP on column data bus.
+;
+; Registers Modified:
+;
+;   r0, r1
+;-------------------------------------------------------------------------------
+
+Output_Data_Block:
+
+    LDR     r1, r0          ; Calculate the final address.
+    ADD     r1, 64      
+
+OUTPUT_DATA_BLOCK_LOOP:
+
+    OUT     [r0], 0          ; Row 0
+    OUT     [r0], 1          ; Row 1
+    OUT     [r0], 2          ; Row 2
+    OUT     [r0], 3          ; Row 3
+    OUT     [r0], 4          ; Row 4
+    OUT     [r0], 5          ; Row 5
+    OUT     [r0], 6          ; Row 6
+    OUT     [r0], 7          ; Row 7
+    
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+    BX 

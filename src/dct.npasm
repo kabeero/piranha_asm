@@ -1,0 +1,559 @@
+;-------------------------------------------------------------------------------
+; dct.npasm
+;
+; 2D forward DCT done in an 8x8 block (one NP).  Based on the paper "Fast
+; Multiplierless Approximation of the DCT with the Lifting Scheme".
+;-------------------------------------------------------------------------------
+
+; Define new instruction labels to make the code intuitive to read.
+
+#define ADC_MASK            01000000b   ; Mask for ADC active flag
+#define ROW_MASK            00111000b   ; The row bits.
+#define COL_MASK            00000111b   ; The column bits.
+
+#define START_OF_X          00000000b   ; Starting address of X RAM.
+#define START_OF_Y          01000000b   ; Starting address of Y RAM.
+#define START_OF_Z          10000000b   ; Starting address of X RAM.
+#define START_OF_V          11000000b   ; Starting address of V RAM.
+ 
+#define TRUE                 1          ; True pattern
+#define FALSE                0          ; False pattern
+#define NULL                -1          ; Null pattern
+
+#define NUM_PIXELS          64          ; The number of pixels in the NP.
+
+; Macros
+             
+; a = (a + b)/2
+; b = (a - b)/2
+#macro add_sub (a, b)
+    LDR     r0, $a
+    ASR     r0
+    LDR     r1, r0      ; Save for sub op in a few lines
+    LDR     r2, $b
+    ASR     r2
+    ADD     r0, r2      ; (a + b) / 2
+    SUB     r1, r2      ; (a - b) / 2
+    STR     r0, $a      ; Save result back to source
+    STR     r1, $b
+#endmacro
+                  
+; a = (a + b)/4
+; b = (a - b)/4
+#macro add_sub_div (a, b)
+    LDR     r0, $a
+    ASR     r0
+    LDR     r1, r0      ; Save for sub op in a few lines
+    LDR     r2, $b
+    ASR     r2
+    ADD     r0, r2      ; (a + b) / 2
+    SUB     r1, r2      ; (a - b) / 2
+    ASR     r0          ; (a + b) / 4
+    ASR     r1          ; (a - b) / 4
+    STR     r0, $a      ; Save result back to source
+    STR     r1, $b
+#endmacro
+                  
+; a = (b - a)/4
+; b = (a + b)/4
+#macro add_sub_div_swap (a, b)
+    LDR     r0, $a
+    ASR     r0
+    LDR     r1, r0      ; Save for sub op in a few lines
+    LDR     r2, $b
+    ASR     r2
+    ADD     r0, r2      ; (a + b) / 2
+    SUB     r2, r1      ; (b - a) / 2
+    ASR     r0          ; (a + b) / 4
+    ASR     r2          ; (b - a) / 4
+    STR     r0, $b      ; Save result back to source
+    STR     r2, $a
+#endmacro
+           
+; Loads, DCTs, stores row of data
+#macro dct_row (row)
+    LDR     r0, {START_OF_X + 8*$row}
+    BL      LOAD_ROW
+    BL      DCT
+    LDR     r0, {START_OF_X + 8*$row}
+    BL      STORE_ROW
+#endmacro
+           
+; Loads, DCTs, stores col of data
+#macro dct_col (col)
+    LDR     r0, {START_OF_X + $col}
+    BL      LOAD_COL
+    BL      DCT
+    LDR     r0, {START_OF_X + $col}
+    BL      STORE_COL
+#endmacro
+                               
+CLEAN_SLATE_INIT:
+ 
+    LDR     r0, START_OF_X  ; Overwrite x ram with constant (note this is in gray code)
+    LDR     r2, 0
+    LDR     r1, r0          ; Calculate the final address
+    ADD     r1, NUM_PIXELS      
+
+CLEAN_SLATE_LOOP:
+
+    STR     r2, [r0]
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     CLEAN_SLATE_LOOP
+ 
+START:
+
+ACQUIRE_IMAGE:
+
+    IMG                     ; Acquire a new image from the ADCs with real t_int
+
+WAIT_FOR_ADC:
+
+    ; At this point, the FSM for the ADC is running.  Read the status register
+    ; to check if the conversion is finished. (Note: very inefficient)
+
+    LDR     r0, SR          ; Load the status register
+    AND     r0, ADC_MASK    ; Check if the ADC is active
+    BNZ     WAIT_FOR_ADC    ; Loop while the ADC is converting
+
+CONVERT_TO_BINARY:
+    
+    LDR     r0, START_OF_X  ; Start of image
+    LDR     r1, r0
+    ADD     r1, NUM_PIXELS  ; End of image
+
+CONVERT_TO_BINARY_LOOP:
+
+    LDR     r2, [r0]    ; Convert gray to binary code
+    GTB     r2
+    STR     r2, [r0]
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     CONVERT_TO_BINARY_LOOP
+ 
+; First convert 8 bit unsigned values to signed values.  One options is to LSR,
+; making the input data effectively 7 bits.  A better way is to subtract 128 from
+; the input.  The DCT will be unchanged, except the DC (x0) component will be
+; reduced by 128, which can be corrected later.  This maintains 8 bit resolution.
+                    
+    LDR     r0, START_OF_X
+
+APPLY_DC_OFFSET:
+
+    LDR     r1, [r0]
+    SUB     r1, 128
+    STR     r1, [r0]
+    ADD     r0, 1
+    CMP     r0, {START_OF_X + NUM_PIXELS}
+    BNE     APPLY_DC_OFFSET     ; Detects end of pixel array.
+    
+CALL_DCT_ROW:
+
+    dct_row(0)
+    dct_row(1)
+    dct_row(2)
+    dct_row(3)
+    dct_row(4)
+    dct_row(5)
+    dct_row(6)
+    dct_row(7)
+    
+CALL_DCT_COL:
+
+    dct_col(0)
+    dct_col(1)
+    dct_col(2)
+    dct_col(3)
+    dct_col(4)
+    dct_col(5)
+    dct_col(6)
+    dct_col(7)
+
+; Clear all values except (0,0) DC pixel
+
+ZEROS_INIT:
+
+    LDR    r1, {START_OF_X} 
+    ADD    r1, NUM_PIXELS
+    LDR    r0, {START_OF_X}
+    ADD    r0, 1
+
+ZEROS:
+    
+    LDR    r2, 0
+    STR    r2, [r0]
+    ADD    r0, 1
+    CMP    r0, r1
+    BNE    ZEROS
+
+OUTPUT:
+
+    LDR     r0, START_OF_X
+    BL      Output_Data_Block
+
+END:
+
+    RST
+ 
+;-------------------------------------------------------------------------------
+; DCT
+;-------------------------------------------------------------------------------
+ 
+DCT:
+
+STAGE1: ; Butterflies
+     
+    add_sub(v0, v7)     ; /2
+    add_sub(v1, v6)     ; /2
+    add_sub(v2, v5)     ; /2
+    add_sub(v3, v4)     ; /2
+
+STAGE2: ; Lifting, not scaled by /2, so could overflow (seems ok in matlab sim).
+
+    ; x5 = x5 - (7/16)*x6
+    LDR     r1, v6
+    ASR     r1
+    ASR     r1
+    LDR     r0, r1              ; (1/4)*x6
+    ASR     r1
+    ADD     r0, r1              ; (3/8)*x6
+    ASR     r1
+    ADD     r0, r1              ; (7/16)*x6
+    LDR     r1, v5
+    SUB     r1, r0              
+    STR     r1, v5              ; x5 = x5 - (7/16)*x6
+               
+    ; x6 = x6 + (3/4)*x5
+    LDR     r1, v5
+    ASR     r1
+    LDR     r0, r1              ; (1/2)*x5
+    ASR     r1
+    ADD     r0, r1              ; (3/4)*x5
+    LDR     r1, v6
+    ADD     r1, r0              
+    STR     r1, v6              ; x6 = x6 + (3/4)*x5
+               
+    ; x5 = (3/8)*x6 - x5
+    LDR     r1, v6
+    ASR     r1
+    ASR     r1
+    LDR     r0, r1              ; (1/4)*x6
+    ASR     r1
+    ADD     r0, r1              ; (3/8)*x6
+    LDR     r1, v5
+    SUB     r0, r1              
+    STR     r0, v5              ; x5 = (3/8)*x6 - x5
+
+STAGE3: ; Butterflies, but version that scales outputs for next lifting section.
+
+    add_sub_div(v0, v3)         ; /8
+    add_sub_div(v1, v2)         ; /8
+    add_sub_div(v4, v5)         ; /8
+    add_sub_div_swap(v6, v7)    ; /8
+
+STAGE4: ; Lifting, this time scaled from earlier macro calls.
+
+    ; x0 = x0 + x1
+    LDR     r0, v0
+    ADD     r0, v1
+    STR     r0, v0              ; x0 = x0 + x1
+
+    ; x1 = (1/2)*x0 - x1
+    ASR     r0
+    SUB     r0, v1
+    STR     r0, v1              ; x1 = (1/2)*x0 - x1
+
+    ; x2 = (1/2)*x3 - x2
+    LDR     r0, v3
+    ASR     r0
+    SUB     r0, v2
+    STR     r0, v2              ; x2 = (1/2)*x3 - v2
+ 
+    ; x3 = x3 - (3/8)*x2
+    LDR     r1, v2
+    ASR     r1
+    ASR     r1
+    LDR     r0, r1              ; (1/4)*x2
+    ASR     r1
+    ADD     r0, r1              ; (3/8)*x2
+    LDR     r1, v3
+    SUB     r1, r0
+    STR     r1, v3              ; x3 = x3 - (3/8)*x2
+
+    ; x4 = (3/16)*x7 - x4
+    LDR     r1, v7
+    ASR     r1
+    ASR     r1
+    ASR     r1
+    LDR     r0, r1              ; (1/8)*x7
+    ASR     r1
+    ADD     r0, r1              ; (3/16)*x7
+    SUB     r0, v4
+    STR     r0, v4              ; x4 = (3/16)*x7 - x4
+
+    ; x7 = x7 - (1/4)*x4
+    LDR     r0, v4
+    ASR     r0
+    ASR     r0                  ; (1/4)*x4
+    LDR     r1, v7
+    SUB     r1, r0
+    STR     r1, v7              ; x7 = x7 - (1/4)*x4
+
+    ; x5 = x5 + (7/8)*x6
+    LDR     r1, v6
+    ASR     r1
+    LDR     r0, r1              ; (1/2)*x6
+    ASR     r1
+    ADD     r0, r1              ; (3/4)*x6
+    ASR     r1
+    ADD     r0, r1              ; (7/8)*x6
+    ADD     r0, v5
+    STR     r0, v5              ; x5 = x5 + (7/8)*x6
+
+    ; x6 = x6 - (1/2)*x5
+    LDR     r1, v5
+    ASR     r1
+    LDR     r0, v6
+    SUB     r0, r1
+    STR     r0, v6              ;x6 = x6 - (1/2)*x5
+
+DCT_END:
+    
+    BX
+ 
+;-------------------------------------------------------------------------------
+; Load row
+;
+; Description:
+;
+;   Loads a given row of pixels into v memory for easy addressing.
+;
+; Inputs:
+;   
+;   r0      The address of the start of the row to be loaded.
+;
+; Outputs:
+;
+;   The pixel data for the row is copied to v0..v7.
+;
+; Registers Modified:
+;
+;   r1
+;-------------------------------------------------------------------------------
+
+LOAD_ROW:
+
+    LDR     r1, [r0]
+    STR     r1, v0
+    ADD     r0, 1
+    LDR     r1, [r0]
+    STR     r1, v1
+    ADD     r0, 1
+    LDR     r1, [r0]
+    STR     r1, v2
+    ADD     r0, 1
+    LDR     r1, [r0]
+    STR     r1, v3
+    ADD     r0, 1
+    LDR     r1, [r0]
+    STR     r1, v4
+    ADD     r0, 1
+    LDR     r1, [r0]
+    STR     r1, v5
+    ADD     r0, 1
+    LDR     r1, [r0]
+    STR     r1, v6
+    ADD     r0, 1
+    LDR     r1, [r0]
+    STR     r1, v7
+    SUB     r0, 7
+    BX 
+      
+;-------------------------------------------------------------------------------
+; Store row
+;
+; Description:
+;
+;   Stores a given row of pixels into v memory for easy addressing.
+;
+; Inputs:
+;   
+;   r0      The address of the start of the row to be stored.
+;
+; Outputs:
+;
+;   The pixel data for the row is copied from v0..v7.
+;
+; Registers Modified:
+;
+;   r1
+;-------------------------------------------------------------------------------
+
+STORE_ROW:
+
+    LDR     r1, v0
+    STR     r1, [r0]
+    ADD     r0, 1
+    LDR     r1, v1
+    STR     r1, [r0]
+    ADD     r0, 1
+    LDR     r1, v2
+    STR     r1, [r0]
+    ADD     r0, 1
+    LDR     r1, v3
+    STR     r1, [r0]
+    ADD     r0, 1
+    LDR     r1, v4
+    STR     r1, [r0]
+    ADD     r0, 1
+    LDR     r1, v5
+    STR     r1, [r0]
+    ADD     r0, 1
+    LDR     r1, v6
+    STR     r1, [r0]
+    ADD     r0, 1
+    LDR     r1, v7
+    STR     r1, [r0]
+    SUB     r0, 7
+    BX 
+ 
+;-------------------------------------------------------------------------------
+; Load col
+;
+; Description:
+;
+;   Loads a given col of pixels into v memory for easy addressing.
+;
+; Inputs:
+;   
+;   r0      The address of the start of the col to be loaded.
+;
+; Outputs:
+;
+;   The pixel data for the col is copied to v0..v7.
+;
+; Registers Modified:
+;
+;   r1
+;-------------------------------------------------------------------------------
+
+LOAD_COL:
+
+    LDR     r1, [r0]
+    STR     r1, v0
+    ADD     r0, 8
+    LDR     r1, [r0]
+    STR     r1, v1
+    ADD     r0, 8
+    LDR     r1, [r0]
+    STR     r1, v2
+    ADD     r0, 8
+    LDR     r1, [r0]
+    STR     r1, v3
+    ADD     r0, 8
+    LDR     r1, [r0]
+    STR     r1, v4
+    ADD     r0, 8
+    LDR     r1, [r0]
+    STR     r1, v5
+    ADD     r0, 8
+    LDR     r1, [r0]
+    STR     r1, v6
+    ADD     r0, 8
+    LDR     r1, [r0]
+    STR     r1, v7
+    SUB     r0, 56
+    BX 
+      
+;-------------------------------------------------------------------------------
+; Store col
+;
+; Description:
+;
+;   Stores a given col of pixels into v memory for easy addressing.
+;
+; Inputs:
+;   
+;   r0      The address of the start of the col to be stored.
+;
+; Outputs:
+;
+;   The pixel data for the col is copied from v0..v7.
+;
+; Registers Modified:
+;
+;   r1
+;-------------------------------------------------------------------------------
+
+STORE_COL:
+
+    LDR     r1, v0
+    STR     r1, [r0]
+    ADD     r0, 8
+    LDR     r1, v1
+    STR     r1, [r0]
+    ADD     r0, 8
+    LDR     r1, v2
+    STR     r1, [r0]
+    ADD     r0, 8
+    LDR     r1, v3
+    STR     r1, [r0]
+    ADD     r0, 8
+    LDR     r1, v4
+    STR     r1, [r0]
+    ADD     r0, 8
+    LDR     r1, v5
+    STR     r1, [r0]
+    ADD     r0, 8
+    LDR     r1, v6
+    STR     r1, [r0]
+    ADD     r0, 8
+    LDR     r1, v7
+    STR     r1, [r0]
+    SUB     r0, 56
+    BX 
+    
+;-------------------------------------------------------------------------------
+; Output_Data_Block
+;
+; Description:
+;
+;   The output function, which dumps 64 bytes of data out through the column
+;   data bus.  This can be called with different starting addresses to determine
+;   whether X, Y, Z or some other block is output.
+;
+; Inputs:
+;
+;   r0          The address to begin outputing.  The last byte will be output
+;               from address r0+63.
+;
+; Outputs:
+;
+;   -           64 bytes for each NP on column data bus.
+;
+; Registers Modified:
+;
+;   r0, r1
+;-------------------------------------------------------------------------------
+
+Output_Data_Block:
+
+    LDR     r1, r0          ; Calculate the final address.
+    ADD     r1, 64      
+
+OUTPUT_DATA_BLOCK_LOOP:
+
+    OUT     [r0], 0          ; Row 0
+    OUT     [r0], 1          ; Row 1
+    OUT     [r0], 2          ; Row 2
+    OUT     [r0], 3          ; Row 3
+    OUT     [r0], 4          ; Row 4
+    OUT     [r0], 5          ; Row 5
+    OUT     [r0], 6          ; Row 6
+    OUT     [r0], 7          ; Row 7
+    
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+    BX 

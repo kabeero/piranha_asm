@@ -1,0 +1,61 @@
+ 0 000h |                         | ;-------------------------------------------------------------------------------
+ 0 000h |                         | ; rcr_readout.npasm
+ 0 000h |                         | ;-------------------------------------------------------------------------------
+ 0 000h |                         |   
+ 0 000h |                         | ; Architecture constants
+ 0 000h |                         | 
+ 0 000h |                         | #define START_OF_X          00000000b   ; Starting address of X RAM.
+ 0 000h |                         | #define START_OF_Y          01000000b   ; Starting address of Y RAM.
+ 0 000h |                         | #define START_OF_Z          10000000b   ; Starting address of X RAM.
+ 0 000h |                         | #define START_OF_V          11000000b   ; Starting address of V RAM.
+ 0 000h |                         | #define NUM_PIXELS          64          ; The number of pixels in one NP.
+ 0 000h |                         | 
+ 0 000h |                         | ; Variables
+ 0 000h |                         | 
+ 0 000h |                         | #define addr                r0          ; The address to write to.
+ 0 000h |                         | #define final_addr          r1          ; The last address to write to.
+ 0 000h |                         | #define pattern             r3          ; The pattern to write.
+ 0 000h |                         | 
+ 0 000h |                         | START:
+ 0 000h |                         | 
+ 0 000h |                         | LOAD_PATTERN_INIT:
+ 0 000h |                         |  
+ 0 000h | 4100h 0100000100000000b |     LDR     addr, START_OF_X        ; Load pattern into RAM.
+ 1 001h | 42D0h 0100001011010000b |     LDR     final_addr, addr        ; Calculate the final address.
+ 2 002h | 0340h 0000001101000000b |     ADD     final_addr, NUM_PIXELS
+ 3 003h | 46F8h 0100011011111000b |     LDR     pattern, rcr            ; Load each np with a unique pattern.
+ 4 004h |                         | 
+ 4 004h |                         | LOAD_PATTERN_LOOP:
+ 4 004h |                         | 
+ 4 004h | 4EF0h 0100111011110000b |     STR     pattern, [addr]         ; Save the pattern in each location.
+ 5 005h | 0701h 0000011100000001b |     ADD     pattern, 1              ; Increment so each pixel is different.
+ 6 006h | 0101h 0000000100000001b |     ADD     addr, 1                 ; Check if all pixels are covered.
+ 7 007h | 38D1h 0011100011010001b |     CMP     addr, final_addr
+ 8 008h | C043h 1100000001000011b |     BLO     LOAD_PATTERN_LOOP
+ 9 009h |                         |  
+ 9 009h |                         | OUTPUT_DATA_BLOCK_SETUP:
+ 9 009h |                         | 
+ 9 009h | 4100h 0100000100000000b |     LDR     addr, START_OF_X        ; Output the X RAM.
+10 00Ah | 42D0h 0100001011010000b |     LDR     final_addr, addr        ; Calculate the final address.
+11 00Bh | 0340h 0000001101000000b |     ADD     final_addr, NUM_PIXELS
+12 00Ch |                         |                 
+12 00Ch |                         | OUTPUT_DATA_BLOCK_LOOP:
+12 00Ch |                         | 
+12 00Ch | A0F0h 1010000011110000b |     OUT     [addr], 0               ; Row 0
+13 00Dh | A2F0h 1010001011110000b |     OUT     [addr], 1               ; Row 1
+14 00Eh | A4F0h 1010010011110000b |     OUT     [addr], 2               ; Row 2
+15 00Fh | A6F0h 1010011011110000b |     OUT     [addr], 3               ; Row 3
+16 010h | A8F0h 1010100011110000b |     OUT     [addr], 4               ; Row 4
+17 011h | AAF0h 1010101011110000b |     OUT     [addr], 5               ; Row 5
+18 012h | ACF0h 1010110011110000b |     OUT     [addr], 6               ; Row 6
+19 013h | AEF0h 1010111011110000b |     OUT     [addr], 7               ; Row 7
+20 014h |                         |     
+20 014h | 0101h 0000000100000001b |     ADD     addr, 1                 ; Check if done outputting the RAM.
+21 015h | 38D1h 0011100011010001b |     CMP     addr, final_addr
+22 016h | C0C1h 1100000011000001b |     BNE     OUTPUT_DATA_BLOCK_LOOP
+23 017h |                         | 
+23 017h |                         | END:
+23 017h |                         | 
+23 017h | C00Fh 1100000000001111b |     B       START
+24 018h |                         | 
+24 018h |                         |  

@@ -1,0 +1,185 @@
+;-------------------------------------------------------------------------------
+; testbench-img.npasm
+; Used to view the internal ADC FSM signals
+;-------------------------------------------------------------------------------
+   
+; Architecture constants
+
+#define START_OF_X          00000000b   ; Starting address of X RAM.
+#define START_OF_Y          01000000b   ; Starting address of Y RAM.
+#define START_OF_Z          10000000b   ; Starting address of X RAM.
+#define START_OF_V          11000000b   ; Starting address of V RAM.
+#define NUM_PIXELS          64          ; The number of pixels in one NP.
+
+#define AF_MASK 40h
+
+; Variables
+
+#define addr                r0          ; The address to write to.
+#define final_addr          r1          ; The last address to write to.
+ 
+START:
+    
+    NOP
+              
+LOAD_TIMERS_1:
+
+    TINTL   10h     ; Make tint = 2 * trst
+    TINTH   00h
+
+    TRSTL   08h
+    TRSTH   00h
+
+    IMG
+
+WAIT_FOR_IMG_CAPTURE_1:
+
+    ; Wait for the ADC FSM to counte and acquire an image.  Use the status
+    ; register to monitor it.  Also, r0 is under ADC control during this time
+    ; and may not be used by the NP.
+    
+    LDR     r1, SR
+    AND     r1, AF_MASK
+    BNE     WAIT_FOR_IMG_CAPTURE_1
+
+;LOAD_TIMERS_2:
+;
+;    TINTL   00h     ; Make tint = 4 * trst
+;    TINTH   04h
+;
+;    TRSTL   00h
+;    TRSTH   01h
+;
+;    IMG
+;                      
+;WAIT_FOR_IMG_CAPTURE_2:
+;
+;    LDR     r1, SR
+;    AND     r1, AF_MASK
+;    BNE     WAIT_FOR_IMG_CAPTURE_2
+
+GRAY_TO_BINARY_INIT:
+
+    LDR     addr, START_OF_X        ; Convert the X RAM.
+    LDR     final_addr, addr        ; Calculate the final address.
+    ADD     final_addr, NUM_PIXELS
+
+GRAY_TO_BINARY_LOOP:
+
+    LDR     r2, [addr]
+    GTB     r2
+    STR     r2, [addr]
+  
+    ADD     addr, 1                 ; Check if done converting the RAM.
+    CMP     addr, final_addr
+    BNE     GRAY_TO_BINARY_LOOP
+                      
+OUTPUT_DATA_BLOCK_INIT:
+
+    LDR     addr, START_OF_X        ; Output the X RAM.
+    LDR     final_addr, addr        ; Calculate the final address.
+    ADD     final_addr, NUM_PIXELS
+                
+OUTPUT_DATA_BLOCK_LOOP:
+
+    OUT     [addr], 0               ; Row 0
+    OUT     [addr], 1               ; Row 1
+    OUT     [addr], 2               ; Row 2
+    OUT     [addr], 3               ; Row 3
+    OUT     [addr], 4               ; Row 4
+    OUT     [addr], 5               ; Row 5
+    OUT     [addr], 6               ; Row 6
+    OUT     [addr], 7               ; Row 7
+    
+    ADD     addr, 1                 ; Check if done outputting the RAM.
+    CMP     addr, final_addr
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+                      
+END:
+
+    RST
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

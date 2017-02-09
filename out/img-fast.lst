@@ -1,0 +1,69 @@
+ 0 000h |                         | ;-------------------------------------------------------------------------------
+ 0 000h |                         | ; img.npasm
+ 0 000h |                         | ;-------------------------------------------------------------------------------
+ 0 000h |                         | 
+ 0 000h |                         | #define MASK_AF 01000000b   ; Mask for ADC active flag
+ 0 000h |                         | #define BZ      BEQ         ; Alias branch if zero to branch if equal
+ 0 000h |                         | #define BNZ     BNE         ; Alias branch if not zero to branch if not equal
+ 0 000h |                         | 
+ 0 000h |                         | START:
+ 0 000h |                         | 
+ 0 000h | 8280h 1000001010000000b |     NOP                     ; Add dummy cycle since imaging immediately on 
+ 1 001h |                         |                             ;   reset is awkward for simulation purposes.
+ 1 001h |                         | 
+ 1 001h |                         | ;CLEAN_SLATE_INIT:
+ 1 001h |                         | ; 
+ 1 001h |                         | ;    LDR     r0, 0           ; Overwrite x ram with constant (note this is in gray code)
+ 1 001h |                         | ;    LDR     r2, 255      
+ 1 001h |                         | ;    LDR     r1, r0          ; Calculate the final address
+ 1 001h |                         | ;    ADD     r1, 64      
+ 1 001h |                         | ;
+ 1 001h |                         | ;CLEAN_SLATE_LOOP:
+ 1 001h |                         | ;
+ 1 001h |                         | ;    STR     r2, [r0]
+ 1 001h |                         | ;    ADD     r0, 1
+ 1 001h |                         | ;    CMP     r0, r1
+ 1 001h |                         | ;    BNE     CLEAN_SLATE_LOOP
+ 1 001h |                         |  
+ 1 001h |                         | ACQUIRE_IMAGE:
+ 1 001h |                         | 
+ 1 001h | 8220h 1000001000100000b |     IMG                     ; Acquire a new image from the ADCs
+ 2 002h |                         | 
+ 2 002h |                         | OUTPUT_DATA_BLOCK_INIT:
+ 2 002h |                         | 
+ 2 002h |                         |     ; Begin outputting all of the data in x, which is the newly captured image.
+ 2 002h |                         | 
+ 2 002h | 4100h 0100000100000000b |     LDR     r0, 0           ; Output x ram
+ 3 003h | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address
+ 4 004h | 0340h 0000001101000000b |     ADD     r1, 64      
+ 5 005h |                         | 
+ 5 005h |                         | OUTPUT_DATA_BLOCK_LOOP:
+ 5 005h |                         | 
+ 5 005h | 44F0h 0100010011110000b |     LDR     r2, [r0]        ; Convert gray to binary code
+ 6 006h | 8C20h 1000110000100000b |     GTB     r2
+ 7 007h | 4CF0h 0100110011110000b |     STR     r2, [r0]
+ 8 008h | A0F0h 1010000011110000b |     OUT     [r0], 0         ; Row 0
+ 9 009h | A2F0h 1010001011110000b |     OUT     [r0], 1         ; Row 1
+10 00Ah | A4F0h 1010010011110000b |     OUT     [r0], 2         ; Row 2
+11 00Bh | A6F0h 1010011011110000b |     OUT     [r0], 3         ; Row 3
+12 00Ch | A8F0h 1010100011110000b |     OUT     [r0], 4         ; Row 4
+13 00Dh | AAF0h 1010101011110000b |     OUT     [r0], 5         ; Row 5
+14 00Eh | ACF0h 1010110011110000b |     OUT     [r0], 6         ; Row 6
+15 00Fh | AEF0h 1010111011110000b |     OUT     [r0], 7         ; Row 7
+16 010h |                         |     
+16 010h | 0101h 0000000100000001b |     ADD     r0, 1
+17 011h | 38D1h 0011100011010001b |     CMP     r0, r1
+18 012h | C051h 1100000001010001b |     BNE     OUTPUT_DATA_BLOCK_LOOP
+19 013h |                         | 
+19 013h |                         | WAIT_FOR_ADC:
+19 013h |                         | 
+19 013h |                         |     ; At this point, the FSM for the ADC is running.  Read the status register
+19 013h |                         |     ; to check if the conversion is finished. (Note: very inefficient)
+19 013h |                         | 
+19 013h | 40F4h 0100000011110100b |     LDR     r0, SR          ; Load the status register
+20 014h | 2140h 0010000101000000b |     AND     r0, MASK_AF     ; Check if the ADC is active
+21 015h | C131h 1100000100110001b |     BNZ     WAIT_FOR_ADC    ; Loop while the ADC is converting
+22 016h |                         | 
+22 016h |                         | END:
+22 016h |                         | 
+22 016h | C00Fh 1100000000001111b |     B       START

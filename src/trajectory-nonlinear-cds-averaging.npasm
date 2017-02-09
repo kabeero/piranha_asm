@@ -1,0 +1,1178 @@
+;-------------------------------------------------------------------------------
+;
+; trajectory-nonlinear-cds.npasm
+;
+;-------------------------------------------------------------------------------
+
+; Define new instruction labels to make the code intuitive to read.
+
+#define PXL_ROW_MASK    00111000b   ; The row bits for pixels
+#define PXL_COL_MASK    00000111b   ; The column bits for pixels
+
+#define PXL_EDGE_N      00000000b   ; Matches pixels on N edge of NP
+#define PXL_EDGE_S      00111000b   ; Matches pixels on S edge of NP
+#define PXL_EDGE_W      00000000b   ; Matches pixels on W edge of NP
+#define PXL_EDGE_E      00000111b   ; Matches pixels on E edge of NP
+ 
+#define START_OF_X      00000000b   ; Starting address of X RAM.
+#define START_OF_Y      01000000b   ; Starting address of Y RAM.
+#define START_OF_Z      10000000b   ; Starting address of Z RAM.
+#define START_OF_V      11000000b   ; Starting address of V RAM.
+ 
+#define NUM_PIXELS      64          ; The number of pixels in the NP.
+#define MASK_AF         01000000b   ; Mask for ADC active flag
+#define MASK_NF         00000100b   ; Mask for negative flag
+
+; Algorithm constants.
+
+#define THRESHOLD       16          ; Min frame diff. before detection
+
+; Algorithm variables.
+ 
+#define index           r0          ; The current pixel index  0..63
+#define pxlr            r2          ; The current pixel row    0..7
+#define pxlc            r3          ; The current pixel column 0..7
+                           
+#define NULL_BB         0           ; Indicates no bounding box found
+
+#define xmin            z[15]       ; Motion bounding box NW corner x
+#define ymin            z[16]       ; Motion bounding box NW corner y
+#define xmax            z[17]       ; Motion bounding box SE corner x
+#define ymax            z[18]       ; Motion bounding box SE corner y
+
+#define xmin_in         z[21]       ; Motion bounding box NW corner x
+#define ymin_in         z[22]       ; Motion bounding box NW corner y
+#define xmax_in         z[23]       ; Motion bounding box SE corner x
+#define ymax_in         z[24]       ; Motion bounding box SE corner y
+
+; variables / memory locations for the non-linear prediction algorithm
+
+; referring to the old data (saved)
+#define    x_s          y[0]
+#define    y_s          y[1]
+#define   xb_s          y[2] ; the averaged x_i - x_o
+#define   yb_s          y[3]
+#define   dx_s          y[4]
+#define   dy_s          y[5]
+#define  dxb_s          y[6]
+#define  dyb_s          y[7]
+#define  sdx_s          y[8]
+#define  sdy_s          y[9]
+#define  ddx_s          y[10]
+#define  ddy_s          y[11]
+
+; referring to the old data (after copying Y -> Z)
+#define    x_o          z[0]
+#define    y_o          z[1]
+#define   xb_o          z[2]
+#define   yb_o          z[3]
+#define   dx_o          z[4]
+#define   dy_o          z[5]
+#define  dxb_o          z[6]
+#define  dyb_o          z[7]
+#define  sdx_o          z[8]
+#define  sdy_o          z[9]
+#define  ddx_o          z[10]
+#define  ddy_o          z[11]
+#define sddx_i          z[12] ; we dont need these for next iteration, saves X memory
+#define sddy_i          z[13]
+#define    vel          z[14]
+
+; locations of where to store current variables. this uses many rows of NP(0,0) :(
+#define    x_i          x[0]
+#define    y_i          x[1]
+#define   xb_i          x[2]
+#define   yb_i          x[3]
+#define   dx_i          x[4]
+#define   dy_i          x[5]
+#define  dxb_i          x[6]
+#define  dyb_i          x[7]
+#define  sdx_i          x[8]
+#define  sdy_i          x[9]
+#define  ddx_i          x[10]
+#define  ddy_i          x[11]
+#define ddxb_i          x[12]
+#define ddyb_i          x[13]
+#define    xp0          x[14]
+#define    yp0          x[15]
+#define    xp1          x[16]
+#define    yp1          x[17]
+#define    xp2          x[18]
+#define    yp2          x[19]
+#define    xp3          x[20]
+#define    yp3          x[21]
+#define    xp4          x[22]
+#define    yp4          x[23]
+#define    xp5          x[24]
+#define    yp5          x[25]
+#define    xp6          x[26]
+#define    yp6          x[27]
+#define    xp7          x[28]
+#define    yp7          x[29]
+#define    xp8          x[30]
+#define    yp8          x[31]
+#define    xp9          x[32]
+#define    yp9          x[33]
+
+#define    PREDICT_XP0  00001110b
+#define    PREDICT_YP0  00001111b
+#define    PREDICT_XP9  00100000b
+#define    PREDICT_YP9  00100001b
+#define    XBACKUP_END  00001100b
+#define    YBACKUP_END  01001100b
+             
+;-------------------------------------------------------------------------------
+; Zeroes all of Z memory where the data is stored.  This isn't required,
+; but it makes the output easier to debug.
+         
+; CLEAR_HIST:
+; 
+; CLEAR_HIST_INIT:
+; 
+;     LDR     r0, START_OF_Z
+;     LDR     r1, 0
+; 
+; CLEAR_HIST_LOOP:
+; 
+;     STR     r1, [r0]
+;     ADD     r0, 1
+;     CMP     r0, {START_OF_Z + NUM_PIXELS}
+;     BLO     CLEAR_HIST_LOOP
+;-------------------------------------------------------------------------------
+ 
+START:
+     
+;-------------------------------------------------------------------------------
+; Set the image memory to a consistent value to make it clearer when pixels are 
+; not triggering properly.
+                                          
+; CLEAN_SLATE_INIT:
+;  
+;     LDR     r0, START_OF_X  ; Overwrite x ram with constant (note this is in gray code)
+;     LDR     r2, 00h      
+;     LDR     r1, r0          ; Calculate the final address
+;     ADD     r1, NUM_PIXELS 
+; 
+; CLEAN_SLATE_LOOP:
+; 
+;     STR     r2, [r0]
+;     ADD     r0, 1
+;     CMP     r0, r1
+;     BLO     CLEAN_SLATE_LOOP
+;------------------------------------------------------------------------------- 
+
+
+
+
+
+
+
+;------------------------------------------------------------------------------- 
+;                                   IMAGING 
+;------------------------------------------------------------------------------- 
+
+ACQUIRE_IMAGE_RESET:
+
+    BL     IMG_WAIT            ; Acquire a new image from the ADCs with 0 t_int
+
+MOVE_TO_Z_INIT:
+	
+    LDR    r1, START_OF_X
+    LDR    r2, START_OF_Z
+
+MOVE_TO_Z:
+
+    LDR    r0, [r1]
+    GTB    r0
+    STR    r0, [r2]
+    ADD    r1, 1
+    ADD    r2, 1
+    CMP    r1, NUM_PIXELS
+    BNE    MOVE_TO_Z
+
+ACQUIRE_IMAGE:
+
+    BL     IMG_WAIT            ; Acquire a new image from the ADCs with real t_int
+
+DIFFERENCE_INIT:
+    
+    LDR    r1, START_OF_X
+    LDR    r2, START_OF_Z
+
+DIFFERENCE:                ; X (img) - Z (dark field), X -> signed
+
+    LDR    r0, [r1]
+    GTB    r0
+    CMP    r0, [r2]        ; Check to make sure that after differencing, we don't go negative
+    ZHI
+       LDR    r0, [r2]
+    WAK
+    SUB    r0, [r2]
+    LSR    r0
+    STR    r0, [r1]        ; Store difference, convert to signed in X. max value +127
+    ADD    r1, 1
+    ADD    r2, 1
+    CMP    r1, NUM_PIXELS
+    BNE    DIFFERENCE 
+   
+CLEAR_Z:
+
+    LDR    r1, {START_OF_Z}
+    BL     CLEAR_LOOP
+
+;------------------------------------------------------------------------------- 
+
+
+
+
+
+
+
+
+;------------------------------------------------------------------------------- 
+;                                 DATA RECOVERY
+;------------------------------------------------------------------------------- 
+
+; memory usage:
+; X -> current real image
+; Y -> last frame's signed values
+; Z -> just got used for CDS, available
+
+; we will copy Y memory's stored variables for position, deltas, signs to Z memory, skipping the first row, used later for bb calculation
+; copy Y->Z ('s'aved to 'o'ld, then clear Y)
+
+RECOVER_POINTS:
+    
+    LDR    r0, RCR
+    CMP    r0, 00h
+    ZNE
+        
+        LDR    r1, {START_OF_Y}
+        LDR    r2, {START_OF_Z}
+        LDR    r3, {YBACKUP_END}
+        BL     COPY_LOOP              ; Y -> Z, clear Y or it will throw off bb calc!
+        LDR    r1, {START_OF_Y}
+        BL     CLEAR_LOOP
+
+    WAK
+     
+;------------------------------------------------------------------------------- 
+
+
+
+
+
+
+
+
+
+
+
+;------------------------------------------------------------------------------- 
+;                             FRAME DIFFERENCING
+;------------------------------------------------------------------------------- 
+
+; Iterate through every pixel in the new image (in X) and subtract the old, 
+; previous image (in Y).  The math here is signed since differences can be 
+; positive or negative.  Because of this, images are always divided by a factor 
+; of two in order to prevent overflow during math operations.  The previous 
+; frame is stored in this signed representation as well.
+ 
+FRAME_DIFFERENCE:
+
+FD_LOOP_INIT:
+ 
+    ; Store bounding box coordinates for this NP in V memory.
+
+    LDR r0, 0           ; Clear coordinates, 0 is reserved for NULL
+    STR r0, xmin
+    STR r0, ymin
+    STR r0, xmax
+    STR r0, ymax
+                                         
+    LDR index, START_OF_X      ; Initialize index variables
+                          
+FD_LOOP:
+
+    LDR     pxlc, index         ; Update row/column variables
+    AND     pxlc, PXL_COL_MASK
+    ADD     pxlc, 1             ; C/R numbered from 1-8 since 0 is NULL
+    LDR     pxlr, index
+    LSR     pxlr
+    LSR     pxlr
+    LSR     pxlr
+    ADD     pxlr, 1             ; C/R numbered from 1-8 since 0 is NULL
+
+    LDR     r1, [r0]        ; Load the new pixel value
+    ADD     r0, START_OF_Y  ; Find correspond Y pixel
+    SUB     r1, [r0]        ; signed(new) - signed(old)
+    ZPL                     ; If negative, negate to find absolute value
+        EOR     r1, FFh     ; For two's compliment, xor(x, FFh)+1 = -x
+        ADD     r1, 1
+    WAK
+    CMP     r1, THRESHOLD   ; Binarize image based on threshold
+    ZLO
+        LDR     r1, 255     ; This makes it easier to debug, but is not req'd
+        STR     r1, [r0]
+        LDR     r1, xmin    ; Check if x/y min/max variables are NULL
+        CMP     r1, 0    
+        ZNE                         ; NPs where this is the 1st detection, so
+            STR     pxlc, xmin      ;   this pixel is the min and max
+            STR     pxlr, ymin
+            STR     pxlc, xmax
+            STR     pxlr, ymax
+        WAK
+        ZEQ                         ; Execute if current values are valid
+            CMP     pxlc, xmin      ; Is this the min x encountered?
+            ZGE
+                STR     pxlc, xmin
+            WAK
+            CMP     pxlr, ymin      ; Is this the min y encountered?
+            ZGE
+                STR     pxlr, ymin
+            WAK
+            CMP     pxlc, xmax      ; Is this the max x encountered?
+            ZLE
+                STR     pxlc, xmax
+            WAK
+            CMP     pxlr, ymax      ; Is this the max y encountered?
+            ZLE
+                STR     pxlr, ymax
+            WAK
+        WAK
+    WAK
+
+FD_LOOP_UPDATE:
+
+    ADD     r0, {1 - START_OF_Y}  ; Return to the next pixel in X RAM
+    CMP     r0, NUM_PIXELS
+    BLT     FD_LOOP
+
+
+; Z memory now holds the coordinates (xy_min, xy_max)
+
+
+
+;------------------------------------------------------------------------------- 
+;                              BOUNDING BOXES
+;-------------------------------------------------------------------------------
+
+COMBINE_BOUNDING_BOXES:
+     
+CBB_ROW:
+
+CBB_ROW_INIT:
+
+    LDR     r3, 7       ; Number of shifts to perform, #ROWS-1
+
+CBB_ROW_LOOP:
+
+    ; When combining bounding boxes, several cases may occur:
+    ;
+    ;   1.  Both this NP and the one downstream have NULL coordinate pairs.  In
+    ;       this case, the coordinate pairs should remain NULL
+    ;
+    ;   2.  This NP has NULL data, but the upstream NP has valid data.  In this
+    ;       case, the incoming coordinate pairs should overwrite the local ones.
+    ;
+    ;   3.  This NP has valid data, but the upstream NP does not.  In this case,
+    ;       the coordinate pairs should not be modified.
+    ;
+    ;   4.  Both this NP and the downstream NP have valid coordinate data.  Each
+    ;       coordinate pair must be compared and the more inclusive one saved.
+    ;
+    ; NOTE: When an NP is asleep, it will not write any data to memory or 
+    ;       registers, so any data that needs to be access from a sleeping
+    ;       NP through the NSWE data bus must already be loaded in r0..r3.
+
+    ; Copy incoming coordinates locally to prevent NPs from receiving 
+    ; out-of-sync data.
+
+    LDR     r0, xmin
+    LDR     r0, S
+    STR     r0, xmin_in
+
+    LDR     r0, ymin
+    LDR     r0, S
+    STR     r0, ymin_in
+
+    LDR     r0, xmax
+    LDR     r0, S
+    STR     r0, xmax_in
+
+    LDR     r0, ymax
+    LDR     r0, S
+    STR     r0, ymax_in
+
+    ; First check if the incoming BB coords are NULL.  If so, the NP will should
+    ; disregard any incoming coordinates, since they are uninitialized.  It goes
+    ; to sleep for this loop cycle.
+      
+    LDR     r0, xmin_in     ; Check if the coords are NULL in the other NP    
+    CMP     r0, NULL_BB
+    ZEQ
+ 
+        ; If this NP already found motion pixels itself, it needs to compare 
+        ; the coords of its own internal bounding box to those it receives to
+        ; create a new BB that encloses both BBs.
+
+        LDR     r0, xmin
+        CMP     r0, NULL_BB
+        ZEQ
+            ; xmin
+
+            LDR     r0, xmin_in
+            CMP     r0, xmin        ; Compare it to this NP's value
+            ZHS
+                STR     r0, xmin    ; If lower, save it as the new minimum
+            WAK
+
+            ; ymin
+
+            LDR     r0, ymin_in
+            ADD     r0, 8           ; Add offset since S NP starts 8 rows higher
+            CMP     r0, ymin        ; Compare it to this NP's value
+            ZHS
+                STR     r0, ymin    ; If lower, save it as the new minimum
+            WAK
+                  
+            ; xmax
+
+            LDR     r0, xmax_in
+            CMP     r0, xmax        ; Compare it to this NP's value
+            ZLS
+                STR     r0, xmax    ; If higher, save it as the new maximum
+            WAK
+
+            ; ymin
+             
+            LDR     r0, ymax_in
+            ADD     r0, 8           ; Add offset since S NP starts 8 rows higher
+            CMP     r0, ymax        ; Compare it to this NP's value
+            ZLS
+                STR     r0, ymax    ; If higher, save it as the new maximum
+            WAK
+        WAK  
+
+        ; Next check if this NP found any motion pixels in itself.  If not, all 
+        ; of its x/y min/max entires will be NULL/0 and it can assume the 
+        ; incoming bounding box will enclose its own, as it has none.  So, all
+        ; incoming values are accepted without comparison.
+        ;
+        ; NOTE: Since NPs with NULL values where asleep before, this CMP is 
+        ;       valid for them even though the code above does modify some NPs.
+
+        LDR     r0, xmin
+        CMP     r0, NULL_BB
+        ZNE                     ; If NULL, use incoming coordinates always
+            LDR     r0, xmin_in
+            STR     r0, xmin
+            LDR     r0, ymin_in
+            ADD     r0, 8       ; Add offset since S NP starts 8 rows higher
+            STR     r0, ymin
+            LDR     r0, xmax_in
+            STR     r0, xmax
+            LDR     r0, ymax_in
+            ADD     r0, 8       ; Add offset since S NP starts 8 rows higher
+            STR     r0, ymax
+        WAK
+    WAK
+
+CBB_ROW_LOOP_CONDITION:
+
+    SUB     r3, 1               ; Indicate an additional shift is complete
+    BNZ     CBB_ROW_LOOP
+
+;-------------------------------------------------------------------------------
+      
+CBB_COL:
+
+CBB_COL_INIT:
+
+    LDR     r3, 9       ; Number of shifts to perform, #COLS-1
+
+CBB_COL_LOOP:
+
+    ; When combining bounding boxes, several cases may occur:
+    ;
+    ;   1.  Both this NP and the one downstream have NULL coordinate pairs.  In
+    ;       this case, the coordinate pairs should remain NULL
+    ;
+    ;   2.  This NP has NULL data, but the upstream NP has valid data.  In this
+    ;       case, the incoming coordinate pairs should overwrite the local ones.
+    ;
+    ;   3.  This NP has valid data, but the upstream NP does not.  In this case,
+    ;       the coordinate pairs should not be modified.
+    ;
+    ;   4.  Both this NP and the downstream NP have valid coordinate data.  Each
+    ;       coordinate pair must be compared and the more inclusive one saved.
+    ;
+    ; NOTE: When an NP is asleep, it will not write any data to memory or 
+    ;       registers, so any data that needs to be access from a sleeping
+    ;       NP through the NSWE data bus must already be loaded in r0..r3.
+
+    ; Copy incoming coordinates locally to prevent NPs from receiving 
+    ; out-of-sync data.
+
+    LDR     r0, xmin
+    LDR     r0, E
+    STR     r0, xmin_in
+
+    LDR     r0, ymin
+    LDR     r0, E
+    STR     r0, ymin_in
+
+    LDR     r0, xmax
+    LDR     r0, E
+    STR     r0, xmax_in
+
+    LDR     r0, ymax
+    LDR     r0, E
+    STR     r0, ymax_in
+
+    ; First check if the incoming BB coords are NULL.  If so, the NP will should
+    ; disregard any incoming coordinates, since they are uninitialized.  It goes
+    ; to sleep for this loop cycle.
+      
+    LDR     r0, xmin_in     ; Check if the coords are NULL in the other NP    
+    CMP     r0, NULL_BB
+    ZEQ
+ 
+        ; If this NP already found motion pixels itself, it needs to compare 
+        ; the coords of its own internal bounding box to those it receives to
+        ; create a new BB that encloses both BBs.
+
+        LDR     r0, xmin
+        CMP     r0, NULL_BB
+        ZEQ
+            ; xmin
+
+            LDR     r0, xmin_in
+            ADD     r0, 8           ; Add offset since E NP starts 8 cols higher
+            CMP     r0, xmin        ; Compare it to this NP's value
+            ZHS
+                STR     r0, xmin    ; If lower, save it as the new minimum
+            WAK
+
+            ; ymin
+
+            LDR     r0, ymin_in
+            CMP     r0, ymin        ; Compare it to this NP's value
+            ZHS
+                STR     r0, ymin    ; If lower, save it as the new minimum
+            WAK
+                  
+            ; xmax
+
+            LDR     r0, xmax_in
+            ADD     r0, 8           ; Add offset since E NP starts 8 cols higher
+            CMP     r0, xmax        ; Compare it to this NP's value
+            ZLS
+                STR     r0, xmax    ; If higher, save it as the new maximum
+            WAK
+
+            ; ymin
+             
+            LDR     r0, ymax_in
+            CMP     r0, ymax        ; Compare it to this NP's value
+            ZLS
+                STR     r0, ymax    ; If higher, save it as the new maximum
+            WAK
+        WAK  
+
+        ; Next check if this NP found any motion pixels in itself.  If not, all 
+        ; of its x/y min/max entires will be NULL/0 and it can assume the 
+        ; incoming bounding box will enclose its own, as it has none.  So, all
+        ; incoming values are accepted without comparison.
+        ;
+        ; NOTE: Since NPs with NULL values where asleep before, this CMP is 
+        ;       valid for them even though the code above does modify some NPs.
+
+        LDR     r0, xmin
+        CMP     r0, NULL_BB
+        ZNE                     ; If NULL, use incoming coordinates always
+            LDR     r0, xmin_in
+            ADD     r0, 8       ; Add offset since E NP starts 8 cols higher
+            STR     r0, xmin
+            LDR     r0, ymin_in
+            STR     r0, ymin
+            LDR     r0, xmax_in
+            ADD     r0, 8       ; Add offset since E NP starts 8 cols higher
+            STR     r0, xmax
+            LDR     r0, ymax_in
+            STR     r0, ymax
+        WAK
+    WAK
+
+CBB_COL_LOOP_CONDITION:
+
+    SUB     r3, 1               ; Indicate an additional shift is complete
+    BNZ     CBB_COL_LOOP
+         
+;-------------------------------------------------------------------------------
+; before we embed center_bb and next_x,y into X memory, 
+; lets make an untouched copy in Y which will be used on next iteration
+;-------------------------------------------------------------------------------
+
+COPY_IMAGE:
+
+    LDR    r1, {START_OF_X}
+    LDR    r2, {START_OF_Y}
+    LDR    r3, {NUM_PIXELS}
+    BL     COPY_LOOP
+
+CONVERT_TO_UNSIGNED: 
+
+    LDR    r1, {START_OF_X}
+
+CONVERT_TO_UNSIGNED_LOOP:
+
+    LDR    r0, [r1]
+    LSL    r0
+    STR    r0, [r1]            ; max value is now +255
+    ADD    r1, 1
+    CMP    r1, NUM_PIXELS
+    BLO    CONVERT_TO_UNSIGNED_LOOP
+
+;-------------------------------------------------------------------------------
+;                          PREDICTION & CALCULATION
+;-------------------------------------------------------------------------------
+
+FIND_BB_CENTER:
+
+    ; At this point, the (0,0) NP has collected and compared all of the 
+    ; individual NP bounding boxes and found the smallest bounding box that 
+    ; enclosed all of them.  The tracking algorithm assumes the target is at the
+    ; center of this bounding box, which encloses all motion in the frame.  The 
+    ; algorithm finds the center of this box, which roughly corresponds to the 
+    ; location of the tracked object.  In reality, it lags behind the actual
+    ; object location since it is actually tracking motion deltas between 
+    ; frames.
+
+    LDR     r0, RCR
+    CMP     r0, 00h         ; Check if this is the origin NP
+    ZNE                     ; Sleep all other NPs at this point.
+
+        LDR     r0, xmin    ; Find the center x coordinate
+        ADD     r0, xmax
+        LSR     r0
+        STR     r0, xb_i
+        LDR     r0, ymin    ; Find the center y coordinate
+        ADD     r0, ymax
+        LSR     r0
+        STR     r0, yb_i
+
+        ;---------------------------------------------------------
+        ; if this is the first iteration, old values wont be set |
+        ;---------------------------------------------------------
+        
+        LDR    r0, xb_o
+        CMP    r0, 0
+        ZNE
+            LDR    r0, xb_i
+            STR    r0, xb_o
+        WAK
+        LDR    r0, yb_o
+        CMP    r0, 0
+        ZNE
+            LDR    r0, yb_i
+            STR    r0, yb_o
+        WAK
+
+        ;------------------------------------------
+        ; change centroid to actual object center |
+        ;------------------------------------------
+
+        ; LDR     r0, xb_i
+        ; LDR     r1, xb_o
+        ; CMP     r0, r1      ; xb_i vs xb_o
+        ; ZLO                 ; xb_i >= xb_o
+        ;    LDR  r2, xmax    ; going in +x direction, avg(x, xmax)
+        ; WAK
+        ; ZHS                 ; xb_i <  xb_o
+        ;    LDR  r2, xmin    ; going in -x direction, avg(x, xmin)
+        ; WAK
+        ; ADD     r0, r2
+        ; LSR     r0
+        ; STR     r0, x_i
+
+        ; LDR     r0, yb_i
+        ; LDR     r1, yb_o
+        ; CMP     r0, r1      ; yb_i vs yb_o
+        ; ZLO                 ; yb_i >= yb_o
+        ;    LDR  r2, ymax    ; going in +y direction, avg(y, ymax)
+        ; WAK
+        ; ZHS                 ; yb_i <  yb_o
+        ;    LDR  r2, ymin    ; going in -y direction, avg(y, ymin)
+        ; WAK
+        ; ADD     r0, r2
+        ; LSR     r0
+        ; STR     r0, y_i
+
+        LDR    r0, xb_i
+        STR    r0, x_i
+        LDR    r0, yb_i
+        STR    r0, y_i
+
+        ;-------------------------------------------------------------------------------
+        ;   there are 12 possible scenarios:
+        ;-------------------------------------------------------------------------------
+        ; X direction:                              Y direction:
+        ;  --> to ------> : acceleration            |    |    |      |    |      ^
+        ;  ------> to --> : deceleration            | to v    v  to  |    |  to  |
+        ;  ----> to <---- : inflection              v                v    v      |
+        ; 
+        ;  <-- to <------ : acceleration            ^    ^    ^      ^    ^      |
+        ;  <------ to <-- : deceleration            | to |    |  to  |    |  to  |
+        ;  <---- to ----> : inflection              |                |    |      v
+        ;-------------------------------------------------------------------------------
+        
+        
+        
+        ;-------------------------------------------------------------------------------
+        ;
+        ; asm examples:
+        ;
+        ; LDR    r0, x_i        ; should load the VALUE stored in x_i's memory location
+        ;
+        ; LDR    r0, START_OF_X ; loads the static value of r0
+        ; STR    r1, [r0]       ; stores r1 to memory location r0
+        ;
+        ;-------------------------------------------------------------------------------
+        ; we will handle bouncing by XOR'ing sdx_i with sdx_o, if result is 1, sddx = sdx
+        ;-------------------------------------------------------------------------------
+        
+
+        ; for debugging, skip the algorithm?
+        
+        ; WAK
+        ; B OUTPUT_ORIGINAL_IMAGE
+        
+        ;-----------------------
+        ; non-linear algorithm |
+        ;-----------------------
+
+        ;----------
+        ;    X    |
+        ;----------
+        
+        LDR    r0, xb_i
+        CMP    r0, xb_o
+        ZLO                            ; dx_i > 0
+            SUB    r0, xb_o
+            STR    r0, dx_i
+            LDR    r1, 1
+            STR    r1, sdx_i
+            
+            CMP    r0, dx_o
+            ZLO                        ; ddx > 0
+                SUB    r0, dx_o
+                STR    r0, ddx_i
+                LDR    r0, 1
+                STR    r0, sddx_i
+            WAK
+            LDR    r0, dx_o
+            CMP    r0, dx_i
+            ZLO                        ; ddx < 0
+                SUB    r0, dx_i
+                STR    r0, ddx_i
+                LDR    r0, 0
+                STR    r0, sddx_i
+            WAK
+        WAK
+        LDR    r0, xb_o
+        CMP    r0, xb_i
+        ZLO                            ; dx_i < 0
+            SUB    r0, xb_i
+            STR    r0, dx_i
+            LDR    r0, 0
+            STR    r0, sdx_i
+            
+            LDR    r0, dx_i
+            CMP    r0, dx_o
+            ZLO                        ; ddx > 0
+                SUB    r0, dx_o
+                STR    r0, ddx_i
+                LDR    r0, 0
+                STR    r0, sddx_i
+            WAK
+            LDR    r0, dx_o
+            CMP    r0, dx_i
+            ZLO                        ; ddx < 0
+                SUB    r0, dx_i
+                STR    r0, ddx_i
+                LDR    r0, 1
+                STR    r0, sddx_i
+            WAK
+        WAK
+
+        ; all the following is x2 then will be divided by 2
+        ; pseudo-averaging
+        
+        LDR    r1, x_i
+        ADD    r1, x_o
+        LDR    r2, {PREDICT_XP0}
+        LDR    r3, dx_i
+        ADD    r3, dx_o
+        STR    r3, vel
+        
+        PREDICT_X:
+
+            LDR    r0, sdx_i
+            CMP    r0, 1
+            ZNE
+                ADD    r1, vel
+            WAK
+            CMP    r0, 0
+            ZNE
+            	SUB    r1, vel
+            WAK
+            
+            ; check for bouncing (sdx_i xor sdx_o == 1)
+            ; note: seems like a waste to have this in the inner loop, 
+            ; but we need r3 for next velocity too
+            LDR    r3, sdx_i
+            EOR    r3, sdx_o
+
+            CMP    r3, 0
+            ZNE
+                LDR    r0, sddx_i      ; no bounce
+            WAK
+            CMP    r3, 1
+            ZNE
+                LDR    r0, sdx_i       ; bounce detected
+            WAK
+
+            LDR    r3, vel
+            CMP    r0, 1
+            ZNE
+                ADD    r1, ddx_i
+                ADD    r1, ddx_o
+                ADD    r3, ddx_i
+                ADD    r3, ddx_o
+            WAK
+            CMP    r0, 0
+            ZNE
+                SUB    r1, ddx_i
+                SUB    r1, ddx_o
+                SUB    r3, ddx_i
+                SUB    r3, ddx_o
+            WAK
+            STR    r3, vel            ; the changing velocity
+
+            STR    r1, [r2]
+            ADD    r2, 2
+            CMP    r2, {PREDICT_XP9 + 2}
+            BLO    PREDICT_X
+
+        ;----------
+        ;    Y    |
+        ;----------
+        
+        LDR    r0, yb_i
+        CMP    r0, yb_o
+        ZLO                            ; dy_i > 0
+            SUB    r0, yb_o
+            STR    r0, dy_i
+            LDR    r1, 1
+            STR    r1, sdy_i
+            
+            CMP    r0, dy_o
+            ZLO                        ; ddy > 0
+                SUB    r0, dy_o
+                STR    r0, ddy_i
+                LDR    r0, 1
+                STR    r0, sddy_i
+            WAK
+            LDR    r0, dy_o
+            CMP    r0, dy_i
+            ZLO                        ; ddy < 0
+                SUB    r0, dy_i
+                STR    r0, ddy_i
+                LDR    r0, 0
+                STR    r0, sddy_i
+            WAK
+        WAK
+        LDR    r0, yb_o
+        CMP    r0, yb_i
+        ZLO                            ; dy_i < 0
+            SUB    r0, yb_i
+            STR    r0, dy_i
+            LDR    r0, 0
+            STR    r0, sdy_i
+            
+            LDR    r0, dy_i
+            CMP    r0, dy_o
+            ZLO                        ; ddy > 0
+                SUB    r0, dy_o
+                STR    r0, ddy_i
+                LDR    r0, 0
+                STR    r0, sddy_i
+            WAK
+            LDR    r0, dy_o
+            CMP    r0, dy_i
+            ZLO                        ; ddy < 0
+                SUB    r0, dy_i
+                STR    r0, ddy_i
+                LDR    r0, 1
+                STR    r0, sddy_i
+            WAK
+        WAK
+
+        ; all the following is y2 then will be divided by 2
+        ; pseudo-averaging
+        
+        LDR    r1, y_i
+        ADD    r1, y_o
+        LDR    r2, {PREDICT_YP0}
+        LDR    r3, dy_i
+        ADD    r3, dy_o
+        STR    r3, vel
+        
+        PREDICT_Y:
+
+            LDR    r0, sdy_i
+            CMP    r0, 1
+            ZNE
+                ADD    r1, vel
+            WAK
+            CMP    r0, 0
+            ZNE
+            	SUB    r1, vel
+            WAK
+            
+            ; check for bouncing (sdy_i yor sdy_o == 1)
+            ; note: seems like a waste to have this in the inner loop, 
+            ; but we need r3 for next velocity too
+            LDR    r3, sdy_i
+            EOR    r3, sdy_o
+
+            CMP    r3, 0
+            ZNE
+                LDR    r0, sddy_i      ; no bounce
+            WAK
+            CMP    r3, 1
+            ZNE
+                LDR    r0, sdy_i       ; bounce detected
+            WAK
+
+            LDR    r3, vel
+            CMP    r0, 1
+            ZNE
+                ADD    r1, ddy_i
+                ADD    r1, ddy_o
+                ADD    r3, ddy_i
+                ADD    r3, ddy_o
+            WAK
+            CMP    r0, 0
+            ZNE
+                SUB    r1, ddy_i
+                SUB    r1, ddy_o
+                SUB    r3, ddy_i
+                SUB    r3, ddy_o
+            WAK
+            STR    r3, vel            ; the changing velocity
+
+            STR    r1, [r2]
+            ADD    r2, 2
+            CMP    r2, {PREDICT_YP9 + 2}
+            BLO    PREDICT_Y
+
+        
+        ;--------------
+        ; divide by 2 |
+        ;--------------
+        
+            LDR    r2, {PREDICT_XP0}
+
+        LOOP_DIVIDE_PREDICTS:
+
+            LDR    r0, [r2]
+            LSR    r0
+            STR    r0, [r2]
+            ADD    r2, 1
+            CMP    r2, {PREDICT_YP9 + 1}
+            BLO    LOOP_DIVIDE_PREDICTS
+        
+        ;-------------------------------------------------------------------------------
+        ; copy X[0:7] to Y[0:7]: x, y, xb, yb, dx, dy, sdx, sdy
+        ;-------------------------------------------------------------------------------
+        
+            LDR    r1, {START_OF_X}
+            LDR    r2, {START_OF_Y}
+            LDR    r3, {XBACKUP_END}
+            BL     COPY_LOOP
+    WAK
+
+    B      OUTPUT_ORIGINAL_IMAGE
+
+;-------------------------------------------------------------------------------
+;                              HELPER FUNCTIONS
+;-------------------------------------------------------------------------------
+
+
+IMG_WAIT:                      ; integrates photodiodes, starts ramp with t_int
+                               ; returns when imaging complete
+
+    IMG
+
+    ; At this point, the FSM for the ADC is running.  Read the status register
+    ; to check if the conversion is finished. (Note: very inefficient)
+
+IMG_WAIT_FOR_ADC:
+
+    LDR     r0, SR             ; Load the status register
+    AND     r0, MASK_AF        ; Check if the ADC is active
+    BNZ     IMG_WAIT_FOR_ADC   ; Loop while the ADC is converting
+    BX
+
+COPY_LOOP:                     ; copies r1 -> r2 until r1 == r3
+
+    LDR    r0, [r1]
+    STR    r0, [r2]
+    ADD    r1, 1
+    ADD    r2, 1
+    CMP    r1, r3
+    BLO    COPY_LOOP
+    BX
+
+CLEAR_LOOP:                    ; clears r1 until r1 == r3
+
+    LDR    r0, 0
+    STR    r0, [r1]
+    ADD    r1, 1
+    CMP    r1, r3
+    BLO    CLEAR_LOOP
+    BX
+
+;-------------------------------------------------------------------------------
+; these functions may be correct, but they consumes too many lines with the
+; initialization + break vs using variables or doing it numerous times above
+;-------------------------------------------------------------------------------
+
+; IMG_POST:                      ; used after imaging
+;                                ; will copy r1 -> r2 with gray-to-binary
+;                                ; if r3 is != 0, performs subtraction 
+; 
+;     LDR    r0, [r1]
+;     GTB    r0
+;     CMP    r3, 0
+;     ZEQ
+;         CMP    r0, [r2]
+;         ZHI
+;             LDR    r0, [r2]
+;         WAK
+;         SUB    r0, [r2]
+;         STR    r0, [r1]
+;     WAK
+;     CMP    r3, 0
+;     ZNE
+;         STR    r0, [r2]
+;     WAK
+;     ADD    r1, 1
+;     ADD    r2, 1
+;     CMP    r1, NUM_PIXELS
+;     BLO    IMG_POST
+;     BX
+
+; CHANGE_SIGN:                   ; converts from signed to unsigned depending on
+;                                ; r3 == 0: /2 -> unsigned to signed (0-127)
+;                                ; r3 == 1: x2 -> signed to unsigned (0-255)
+;                                ; r1 : starting values
+;                                ; r2 : stop value
+;                                ; r3 : conversion type
+; 
+;     LDR    r0, [r1]
+;     CMP    r3, 0
+;     ZNE
+;         LSR   r0
+;     WAK
+;     CMP    r3, 1
+;     ZNE
+;         LSL   r0
+;     WAK
+;     STR    r0, [r1]
+;     ADD    r1, 1
+;     CMP    r1, r2
+;     BLO    CHANGE_SIGN
+;     BX
+
+; PAIR_CHECK_NULL:     ; checks if r2 is null, then r1 -> [r2]
+;                      ; prevents averages from becoming x/2
+; 
+;     LDR    r0, [r2]
+;     CMP    r0, 0
+;     ZNE    
+;         LDR   r0, [r1]
+;         STR   r0, [r2]
+;         ADD   r1, 1
+;         ADD   r2, 1
+;         LDR   r0, [r1]
+;         STR   r0, [r2]
+;     WAK
+;     BX
+
+
+; PAIR_AVERAGE:        ; puts avg(r1, r2) -> [r1+2]
+; 
+;     LDR    r0, [r1]
+;     ADD    r0, [r2]
+;     LSR    r0
+;     ADD    r1, 2
+;     STR    r0, [r1]
+;     BX
+
+;-------------------------------------------------------------------------------
+;                                   OUTPUT 
+;-------------------------------------------------------------------------------
+
+OUTPUT_ORIGINAL_IMAGE:
+
+    LDR     r0, START_OF_X
+    BL      OUTPUT_DATA_BLOCK   ; Output the image
+     
+B       START
+
+;-------------------------------------------------------------------------------
+; OUTPUT_DATA_BLOCK
+;
+; Description:
+;
+;   The output function, which dumps 64 bytes of data out through the column
+;   data bus.  This can be called with different starting addresses to determine
+;   whether X, Y, Z or some other block is output.
+;
+; Inputs:
+;
+;   r0          The address to begin outputing.  The last byte will be output
+;               from address r0+63.
+;
+; Outputs:
+;
+;   -           64 bytes for each NP on column data bus.
+;
+; Registers Modified:
+;
+;   r0, r1
+;-------------------------------------------------------------------------------
+
+OUTPUT_DATA_BLOCK:
+
+    LDR     r1, r0          ; Calculate the final address.
+    ADD     r1, NUM_PIXELS      
+
+OUTPUT_DATA_BLOCK_LOOP:
+
+    OUT     [r0], 0          ; Row 0
+    OUT     [r0], 1          ; Row 1
+    OUT     [r0], 2          ; Row 2
+    OUT     [r0], 3          ; Row 3
+    OUT     [r0], 4          ; Row 4
+    OUT     [r0], 5          ; Row 5
+    OUT     [r0], 6          ; Row 6
+    OUT     [r0], 7          ; Row 7
+    
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+    BX 

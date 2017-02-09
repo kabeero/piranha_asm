@@ -1,0 +1,269 @@
+;-------------------------------------------------------------------------------
+; ezw.asm
+;-------------------------------------------------------------------------------
+
+
+; Define new instruction labels to make the code intuitive to read.
+
+#define ROW_MASK            11110000b   ; The row bits.
+#define COL_MASK            00001111b   ; The column bits.
+
+#define CODEWORD_MASK       00000011b   ; The codeword bits.
+#define OUTPUT_ENABLE_MASK  00010000b   ; Nothing but the output flag.
+ 
+#define START_OF_X          00000000b   ; Starting address of X RAM.
+#define START_OF_Y          01000000b   ; Starting address of Y RAM.
+#define START_OF_Z          10000000b   ; Starting address of X RAM.
+#define START_OF_V          11000000b   ; Starting address of V RAM.
+ 
+#define TRUE                 1          ; True pattern
+#define FALSE                0          ; False pattern
+#define NULL                -1          ; Null pattern
+
+#define NUM_PIXELS          64          ; The number of pixels in the NP.
+
+; EZW algorithm variables.
+
+#define threshold           v7          ; Current threshold.
+#define sub_list_end        v6          ; Current length of the subordinate list.
+#define data_buf            v5          ; Byte buffer to hold output bit stream.
+#define data_buf_len        v4          ; Number of valid bits in data_buf.
+                             
+#define list                x           ; The RAM for the subordinate list.
+#define codes               y           ; The RAM for codewords and other flags.
+#define image               z           ; The RAM storing the image.
+
+#define START_OF_CODES      START_OF_Y
+#define START_OF_SUB_LIST   START_OF_Z
+#define FIRST_PARENT_ADDR   1
+#define LAST_PARENT_ADDR    15
+
+; EZW algorithm constants.
+ 
+#define SP                  r3              ; The stack pointer
+ 
+#define ZTR                 00b         ; Zerotree root
+#define POS                 01b         ; Positive
+#define IZ                  10b         ; Isolated zero
+#define NEG                 11b         ; Negative
+
+; Macros
+
+#macro move_data (src_block, src_addr, dst_block, dst_addr)
+    LDR     r0, $src_block[$src_addr]
+    STR     r0, $dst_block[$dst_addr]
+#endmacro
+
+;-------------------------------------------------------------------------------
+;
+;-------------------------------------------------------------------------------
+
+START:
+
+    BL      Branch_Test
+    BL      Sleep_Test
+    BL      ALU_Test
+    B       END
+
+END:
+    
+    B       END
+
+;-------------------------------------------------------------------------------
+; ALU Test
+;
+;
+;-------------------------------------------------------------------------------
+
+ALU_Test:
+
+    LDR     r0, 130     ; 130
+    ADD     r0, 45      ; 175
+    SUB     r0, 170     ; 5
+    ADD     r0, 255     ; 4, with OF=1
+    LSL     r0          ; 8
+    EOR     r0, A5h     ; ADh=173
+    ADD     r0, 82      ; 255
+    ADD     r0, 1       ; 0
+    BX
+
+;-------------------------------------------------------------------------------
+; Sleep Test
+;
+; Result: (7,4):    r0=11h r1=FFh r2=AAh r3=55h
+;         (7,even): r0=??h r1=FFh r2=AAh r3=55h
+;         (7,x):    r0=??h r1=FFh r2=??h r3=55h
+;         (x,x):    r0=??h r1=??h r2=??h r3=??h
+;-------------------------------------------------------------------------------
+Sleep_Test:
+
+    LDR     r0, 0Ah
+    LDR     r1, 1Ah
+    LDR     r2, 2Ah
+    LDR     r3, 3Ah
+    LDR     r0, rcr     ; Load r1 with special value only for last row.
+    LSR     r0
+    LSR     r0
+    LSR     r0
+    LSR     r0
+    CMP     r0, 7
+    ZNE     
+        LDR     r1, FFh
+        LDR     r0, rcr     ; Load r2 with special value only for even columns.
+        AND     r0, COL_MASK
+        AND     r0, 01h     
+        ZNE  
+            LDR     r2, AAh
+            LDR     r0, rcr
+            AND     r0, COL_MASK
+            CMP     r0, 4
+            ZNE
+                LDR     r0, 11h
+            WAK
+        WAK
+        LDR     r3, 55h
+    WAK
+    BL      Output_R0
+    BL      Output_R1
+    BL      Output_R2
+    BL      Output_R3
+    BX
+
+;-------------------------------------------------------------------------------
+Branch_Test:
+
+    LDR     r0, BEh
+    BL      Output_R0
+    B       BRANCH_C
+
+BRANCH_A:
+
+    LDR     r0, Ah
+    BL      Output_R0
+    B       BRANCH_TEST_END
+
+BRANCH_B:
+
+    LDR     r0, Bh
+    BL      Output_R0
+    B       BRANCH_A
+
+BRANCH_C:
+
+    LDR     r0, Ch
+    BL      Output_R0
+    B       BRANCH_B
+
+BRANCH_TEST_END:
+
+    LDR     r0, EFh
+    BL      Output_R0
+    BX
+ 
+;-------------------------------------------------------------------------------
+; Output_Rx
+;
+; Description:
+;
+;   Outputs R0 for all NPs.
+;
+; Inputs:
+;
+;   rx          The value to output.
+;
+; Outputs:
+;
+;   -           The value in rx.
+;
+; Registers Modified:
+;
+;   None
+;-------------------------------------------------------------------------------
+       
+Output_R0:
+
+    OUT     r0, 0          ; Row 0
+    OUT     r0, 1          ; Row 1
+    OUT     r0, 2          ; Row 2
+    OUT     r0, 3          ; Row 3
+    OUT     r0, 4          ; Row 4
+    OUT     r0, 5          ; Row 5
+    OUT     r0, 6          ; Row 6
+    OUT     r0, 7          ; Row 7
+    BX  
+     
+Output_R1:
+
+    OUT     r1, 0          ; Row 0
+    OUT     r1, 1          ; Row 1
+    OUT     r1, 2          ; Row 2
+    OUT     r1, 3          ; Row 3
+    OUT     r1, 4          ; Row 4
+    OUT     r1, 5          ; Row 5
+    OUT     r1, 6          ; Row 6
+    OUT     r1, 7          ; Row 7
+    BX  
+     
+Output_R2:
+
+    OUT     r2, 0          ; Row 0
+    OUT     r2, 1          ; Row 1
+    OUT     r2, 2          ; Row 2
+    OUT     r2, 3          ; Row 3
+    OUT     r2, 4          ; Row 4
+    OUT     r2, 5          ; Row 5
+    OUT     r2, 6          ; Row 6
+    OUT     r2, 7          ; Row 7
+    BX  
+     
+Output_R3:
+
+    OUT     r3, 0          ; Row 0
+    OUT     r3, 1          ; Row 1
+    OUT     r3, 2          ; Row 2
+    OUT     r3, 3          ; Row 3
+    OUT     r3, 4          ; Row 4
+    OUT     r3, 5          ; Row 5
+    OUT     r3, 6          ; Row 6
+    OUT     r3, 7          ; Row 7
+    BX  
+
+;-------------------------------------------------------------------------------
+; Output_Data_Block
+;
+; Description:
+;
+;   The output function, which dumps 64 bytes of data out through the column
+;   data bus.  This can be called with different starting addresses to determine
+;   whether X, Y, Z or some other block is output.
+;
+; Inputs:
+;
+;   r0          The address to begin outputing.  The last byte will be output
+;               from address r0+63.
+;
+; Outputs:
+;
+;   -           64 bytes for each NP on column data bus.
+;
+; Registers Modified:
+;
+;   r0, r1
+;-------------------------------------------------------------------------------
+
+Output_Data_Block:
+
+    LDR     r1, r0          ; Calculate the final address.
+    ADD     r1, 64      
+
+OUTPUT_DATA_BLOCK_LOOP:
+
+    OUT     [r0], 0          ; Row 0
+    OUT     [r0], 1          ; Row 1
+    ;OUT     [r0], 2          ; Row 2
+    ;OUT     [r0], 3          ; Row 3
+    
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+    BX 

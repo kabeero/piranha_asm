@@ -1,0 +1,649 @@
+;-------------------------------------------------------------------------------
+; ezw.asm
+;-------------------------------------------------------------------------------
+
+
+; Define new instruction labels to make the code intuitive to read.
+
+#define ROW_MASK            00111000b   ; The row bits.
+#define COL_MASK            00000111b   ; The column bits.
+
+#define CODEWORD_MASK       00000011b   ; The codeword bits.
+#define OUTPUT_ENABLE_MASK  00010000b   ; Nothing but the output flag.
+ 
+#define START_OF_X          00000000b   ; Starting address of X RAM.
+#define START_OF_Y          01000000b   ; Starting address of Y RAM.
+#define START_OF_Z          10000000b   ; Starting address of X RAM.
+#define START_OF_V          11000000b   ; Starting address of V RAM.
+ 
+#define TRUE                 1          ; True pattern
+#define FALSE                0          ; False pattern
+#define NULL                -1          ; Null pattern
+
+#define NUM_PIXELS          64          ; The number of pixels in the NP.
+
+; EZW algorithm variables.
+
+#define threshold           v7          ; Current threshold.
+#define sub_list_end        v6          ; Current length of the subordinate list.
+#define data_buf            v5          ; Byte buffer to hold output bit stream.
+#define data_buf_len        v4          ; Number of valid bits in data_buf.
+                             
+#define list                x           ; The RAM for the subordinate list.
+#define codes               y           ; The RAM for codewords and other flags.
+#define image               z           ; The RAM storing the image.
+
+#define START_OF_CODES      START_OF_Y
+#define START_OF_SUB_LIST   START_OF_Z
+#define FIRST_PARENT_ADDR   1
+#define LAST_PARENT_ADDR    15
+
+; EZW algorithm constants.
+ 
+#define SP                  r3              ; The stack pointer
+ 
+#define ZTR                 00b         ; Zerotree root
+#define POS                 01b         ; Positive
+#define IZ                  10b         ; Isolated zero
+#define NEG                 11b         ; Negative
+
+; Macros
+
+#macro move_data (src_block, src_addr, dst_block, dst_addr)
+    LDR     r0, $src_block[$src_addr]
+    STR     r0, $dst_block[$dst_addr]
+#endmacro
+
+;-------------------------------------------------------------------------------
+
+
+
+;-------------------------------------------------------------------------------
+;
+;-------------------------------------------------------------------------------
+ 
+; Variables
+
+#define addr                r0          ; The address to write to.
+#define final_addr          r1          ; The last address to write to.
+#define pattern             r3          ; The pattern to write.
+ 
+START:
+
+LOAD_PATTERN_INIT:
+ 
+    NOP
+    LDR     addr, START_OF_X        ; Load pattern into RAM.
+    LDR     final_addr, addr        ; Calculate the final address.
+    ADD     final_addr, NUM_PIXELS
+    LDR     pattern, rcr            ; Load each np with a unique pattern.
+
+LOAD_PATTERN_LOOP:
+
+    STR     pattern, [addr]         ; Save the pattern in each location.
+    ADD     pattern, 1              ; Increment so each pixel is different.
+    ADD     addr, 1                 ; Check if all pixels are covered.
+    CMP     addr, final_addr
+    BLO     LOAD_PATTERN_LOOP
+       
+START_EZW:
+
+    BL      EZW
+
+END:
+
+    ;B       END
+    RST
+
+
+
+;-------------------------------------------------------------------------------
+;
+;-------------------------------------------------------------------------------
+
+EZW:
+
+EZW_INIT:
+
+    LDR     r0, 0                   ; Init the length of the data buffer
+    STR     r0, data_buf_len
+ 
+    LDR     r0, START_OF_SUB_LIST   ; Set up the subordinate list pointer
+    STR     r0, sub_list_end
+                
+    BL      Reorder_Image               ; Map pixel data to a better format.
+    LDR     r0, 128                     ; Set the initial threshold.  Ignore -128
+    STR     r0, threshold
+
+EZW_LOOP:
+
+    BL      Set_Codewords
+    BL      Set_Output_Flags
+    BL      Output_Codewords
+    BL      Output_Sub_List
+    
+    LDR     r0, threshold               ; Update the threshold.
+    LSR     r0
+    STR     r0, threshold
+
+    CMP     r0, 0                       ; Check if all thresholds are finished
+    BNE     EZW_LOOP
+    B       EZW_FLUSH_BUFFER
+
+EZW_FLUSH_BUFFER:
+
+    LDR     r0, data_buf                ; Flush output buffer if not empty.
+    LDR     r1, data_buf_len
+
+    CMP     r1, 0                       ; Ignore NPs with empty buffers.
+    ZEQ     
+
+        CMP     r1, 8
+
+        EZW_FLUSH_BUFFER_LOOP:
+
+        ZHS
+            LSL     r0
+            ADD     r1, 1
+        WAK
+
+        CMP     r1, 8
+        BLO     EZW_FLUSH_BUFFER_LOOP
+
+        OUT     r0, 0
+        OUT     r0, 1
+        OUT     r0, 2
+        OUT     r0, 3
+        OUT     r0, 4
+        OUT     r0, 5
+        OUT     r0, 6
+        OUT     r0, 7
+
+    WAK
+        ;B       EZW_END
+
+EZW_END:
+
+    BX
+
+
+
+;-------------------------------------------------------------------------------                                        
+; Reorder_Image
+;-------------------------------------------------------------------------------                                        
+ 
+Reorder_Image:
+                  
+REORDER_IMAGE_INIT:
+
+    LDR     r0, START_OF_X
+    LDR     r1, START_OF_Z
+
+REORDER_IMAGE_LOOP:
+    
+    LDR     r2, [r0]
+    STR     r2, [r1]
+    ADD     r0, 1
+    ADD     r1, 1
+    CMP     r0, 64
+    BLO     REORDER_IMAGE_LOOP
+    B       REORDER_IMAGE_MAPPING
+
+REORDER_IMAGE_MAPPING:
+    
+    ; TODO: npasm parses macros in comments.
+
+    ;move_data(z, 0,  x, 0 )
+    move_data(z, 1,  x, 16)
+    move_data(z, 2,  x, 4 )
+    move_data(z, 3,  x, 17)
+    move_data(z, 4,  x, 1 )
+    move_data(z, 5,  x, 20)
+    move_data(z, 6,  x, 5 )
+    move_data(z, 7,  x, 21)
+    move_data(z, 8,  x, 32)
+    move_data(z, 9,  x, 48)
+    move_data(z, 10, x, 33)
+    move_data(z, 11, x, 49)
+    move_data(z, 12, x, 36)
+    move_data(z, 13, x, 52)
+    move_data(z, 14, x, 37)
+    move_data(z, 15, x, 53)
+    move_data(z, 16, x, 8 )
+    move_data(z, 17, x, 18)
+    move_data(z, 18, x, 12)
+    ;move_data(z, 19, x, 19)
+    move_data(z, 20, x, 9 )
+    move_data(z, 21, x, 22)
+    move_data(z, 22, x, 13)
+    ;move_data(z, 23, x, 23)
+    move_data(z, 24, x, 34)
+    move_data(z, 25, x, 50)
+    move_data(z, 26, x, 35)
+    move_data(z, 27, x, 51)
+    move_data(z, 28, x, 38)
+    move_data(z, 29, x, 54)
+    move_data(z, 30, x, 39)
+    move_data(z, 31, x, 55)
+    move_data(z, 32, x, 2 )
+    move_data(z, 33, x, 24)
+    move_data(z, 34, x, 6 )
+    move_data(z, 35, x, 25)
+    move_data(z, 36, x, 3 )
+    move_data(z, 37, x, 28)
+    move_data(z, 38, x, 7 )
+    move_data(z, 39, x, 29)
+    ;move_data(z, 40, x, 40)
+    move_data(z, 41, x, 56)
+    move_data(z, 42, x, 41)
+    move_data(z, 43, x, 57)
+    ;move_data(z, 44, x, 44)
+    move_data(z, 45, x, 60)
+    move_data(z, 46, x, 45)
+    move_data(z, 47, x, 61)
+    move_data(z, 48, x, 10)
+    move_data(z, 49, x, 26)
+    move_data(z, 50, x, 14)
+    move_data(z, 51, x, 27)
+    move_data(z, 52, x, 11)
+    move_data(z, 53, x, 30)
+    move_data(z, 54, x, 15)
+    move_data(z, 55, x, 31)
+    move_data(z, 56, x, 42)
+    move_data(z, 57, x, 58)
+    move_data(z, 58, x, 43)
+    ;move_data(z, 59, x, 59)
+    move_data(z, 60, x, 46)
+    move_data(z, 61, x, 62)
+    move_data(z, 62, x, 47)
+    ;move_data(z, 63, x, 63)
+
+REORDER_IMAGE_END:
+
+    BX
+
+
+
+;-------------------------------------------------------------------------------
+; Set_Codewords
+;
+; Recursively sets the appropriate codeword for every element of a tree and 
+; returns whether or not the root is a zerotree root.
+;
+; Input:
+;
+;   threshold       A global variable containing the current threshold.
+;
+; Output:
+;
+;
+;
+; Modified:
+;
+;   r0, r1, r2, r3
+;   
+;------------------------------------------------------------------------------- 
+
+Set_Codewords:
+
+SET_CODEWORDS_INIT:
+
+    LDR     r0, 0
+
+SET_CODEWORDS_LOOP:
+ 
+    ; Check the type of the current element.
+    LDR     r1, [r0]
+
+    ; Pick codeword to use if the pixel is significant.
+    CMP     r1, 0
+
+    ; If pixel is positive.
+    ZMI                         
+        LDR     r2, POS
+    WAK
+
+    ; If pixel is negative.
+    ZPL
+        LDR     r2, NEG
+        EOR     r1, FFh             ; Negate to check the negative threshold.
+        ADD     r1, 1
+    WAK
+
+    ; Check if significant.
+    CMP     r1, threshold
+    ZLO                             ; Sleep is less than (uns since magnitude)
+        LDR     r3, 0
+        STR     r3, [r0]            ; Clear the pixel and save it to the sub. list.
+        LDR     r3, sub_list_end
+        STR     r1, [r3]
+        ADD     r3, 1
+        STR     r3, sub_list_end
+    WAK
+
+    ; Handle insignificant elements.
+    CMP     r1, threshold
+    ZHS
+        LDR     r2, ZTR
+        CMP     r0, 0               ; Check if this is the first element, which
+        ZNE                         ; Must be POS, NEG or IZ.
+            LDR     r2, IZ
+        WAK
+    WAK
+
+    ; Write the codeword to RAM.
+    ADD     r0, START_OF_CODES
+    STR     r2, [r0]
+    SUB     r0, START_OF_CODES
+
+    ; Check if this is the end of the array, and loop if not.
+    ADD     r0, 1
+    CMP     r0, NUM_PIXELS
+    BHS     SET_CODEWORDS_END
+    B       SET_CODEWORDS_LOOP
+     
+SET_CODEWORDS_END:
+         
+    BX  
+
+
+
+;-------------------------------------------------------------------------------
+; Set_Output_Flags
+;
+;
+;-------------------------------------------------------------------------------
+
+Set_Output_Flags:
+
+SET_OUTPUT_FLAGS_INIT:
+
+    ; Start with the last parent and work backward.  The rest are leaves and
+    ; will be ZTR.  
+    LDR     r0, {LAST_PARENT_ADDR + START_OF_CODES}  
+
+SET_OUTPUT_FLAGS_LOOP:
+
+    LDR     r1, [r0]                ; OR the codewords for the parent and 4
+    SUB     r0, START_OF_CODES
+    LSL     r0                      ; Move to the 1st child
+    LSL     r0
+    ADD     r0, START_OF_CODES
+
+    ORR     r1, [r0]                ; OR the codes of all 4 children with that
+    ADD     r0, 1                   ; of the parent.  The resulting value will
+    ORR     r1, [r0]                ; be equal to the ZTR code iff all 5 are
+    ADD     r0, 1                   ; each ZTRs.  If one differs, then all 5
+    ORR     r1, [r0]                ; need to be output, so set the flags.
+    ADD     r0, 1
+    ORR     r1, [r0]
+
+    AND     r1, CODEWORD_MASK
+    CMP     r1, ZTR 
+    ZEQ
+        LDR     r2, [r0]                ; Set each child to be output.
+        ORR     r2, OUTPUT_ENABLE_MASK
+        STR     r2, [r0]
+        SUB     r0, 1
+        LDR     r2, [r0]
+        ORR     r2, OUTPUT_ENABLE_MASK
+        STR     r2, [r0]
+        SUB     r0, 1
+        LDR     r2, [r0]
+        ORR     r2, OUTPUT_ENABLE_MASK
+        STR     r2, [r0]
+        SUB     r0, 1
+        LDR     r2, [r0]
+        ORR     r2, OUTPUT_ENABLE_MASK
+        STR     r2, [r0]
+    WAK
+
+    SUB     r0, START_OF_CODES
+    LSR     r0                      ; Return to the parent, and set it to 
+    LSR     r0                      ; be output.
+    ADD     r0, START_OF_CODES
+
+    CMP     r1, ZTR 
+    ZEQ
+        LDR     r2, [r0]
+        CMP     r2, ZTR                 ; Check if this was assumed to be a ZTR
+        ZNE
+            LDR     r2, IZ              ; If so, update it to be an IZ
+        WAK
+        ORR     r2, OUTPUT_ENABLE_MASK
+        STR     r2, [r0]
+    WAK
+
+    SUB     r0, 1                   ; Move back to reach the next parent
+    CMP     r0, {FIRST_PARENT_ADDR + START_OF_CODES}
+    BHS     SET_OUTPUT_FLAGS_LOOP
+    B       SET_OUTPUT_FLAGS_END
+
+SET_OUTPUT_FLAGS_END:
+
+    LDR     r0, codes[0]              ; The upper 4 elements are output no
+    ORR     r0, OUTPUT_ENABLE_MASK      ; matter their significance.  Set the
+    STR     r0, codes[0]              ; output flag for each manually to 
+    LDR     r0, codes[1]              ; ensure this condition.
+    ORR     r0, OUTPUT_ENABLE_MASK
+    STR     r0, codes[1]
+    LDR     r0, codes[2]
+    ORR     r0, OUTPUT_ENABLE_MASK
+    STR     r0, codes[2]
+    LDR     r0, codes[3]
+    ORR     r0, OUTPUT_ENABLE_MASK
+    STR     r0, codes[3]
+
+    BX
+
+
+        
+;SET_OUTPUT_FLAGS_INIT:
+;
+;    ; Start with the last pixel and work backward.  This processes
+;    ; insignificant children before their parents, ensuring that IZ are detected
+;    ; properly.  
+;    
+;    LDR     r0, {NUM_PIXELS - 1}  
+;
+;SET_OUTPUT_FLAGS_LOOP:
+;
+;    ADD     r0, START_OF_CODES
+;    LDR     r1, [r0]                ; Only perform the following if the pixel
+;    SUB     r0, START_OF_CODES      ; is significant.
+;    AND     r1, CODEWORD_MASK       ; Isolate the codeword.
+;
+;    CMP     r1, ZTR                 
+;    ZEQ                              
+;        CMP     r0, 4               ; For pixels with a parent, set to IZ.
+;        ZLO
+;            LSR     r0              ; Calculate the parent index.  index/4
+;            LSR     r0
+;            LDR     r1, [r0]
+;            CMP     r1, ZTR
+;            ZNE
+;                LDR r1, IZ
+;            WAK
+;            STR     r1, [r0]
+;
+;                
+;            ORR     r1, OUTPUT_ENABLE_MASK
+;            STR     r1, [r0]
+
+            
+                             
+;-------------------------------------------------------------------------------                                        
+; Output_Codewords
+;-------------------------------------------------------------------------------                                        
+
+Output_Codewords:
+
+OUTPUT_CODEWORDS_INIT:
+
+    LDR     r3, {START_OF_CODES}    ; Init codeword pointer to start
+
+OUTPUT_CODEWORDS_LOOP:
+
+    LDR     r0, [r3]
+    AND     r0, OUTPUT_ENABLE_MASK
+    CMP     r0, 0
+    BNE     OUTPUT_CODEWORDS_BUFFER     ; Only buffer if 1+ NPs need to
+    B       OUTPUT_CODEWORDS_NEXT       ; and save the cycles if not.
+
+OUTPUT_CODEWORDS_BUFFER:
+
+    ZEQ                                 ; Sleep if no code to buffer.
+        LDR     r0, [r3]
+        LSR     r0
+        BL      Buffer_1_Bit
+        LDR     r0, [r3]
+        BL      Buffer_1_Bit
+    WAK
+    ;B       OUTPUT_CODEWORDS_NEXT
+
+OUTPUT_CODEWORDS_NEXT:
+
+    ADD     r3, 1
+    CMP     r3, {START_OF_CODES + 64}
+    BLO     OUTPUT_CODEWORDS_LOOP
+    ;B OUTPUT_CODEWORDS_END
+
+OUTPUT_CODEWORDS_END:
+
+    BX
+
+
+
+;-------------------------------------------------------------------------------                                        
+; Output_Sub_List
+;-------------------------------------------------------------------------------                                        
+
+Output_Sub_List:
+
+    LDR     r3, threshold               ; There is no need to refine at last threshold.
+    CMP     r3, 1
+    BEQ     OUTPUT_SUB_LIST_END
+
+    LDR     r3, {START_OF_SUB_LIST}
+
+OUTPUT_SUB_LIST_LOOP:
+
+    CMP     r3, sub_list_end            ; Check if the list has no entries.
+    BLO     OUTPUT_SUB_LIST_BUFFER
+    B       OUTPUT_SUB_LIST_END
+
+OUTPUT_SUB_LIST_BUFFER:
+
+    ZHS
+        LDR     r0, 00h                     ; Assume refined bit is clear.
+        LDR     r1, threshold               ; Load the next threshold
+        LSR     r1
+        AND     r1, [r3]                    ; See if the reined bit is set.
+        ZEQ                                 ; If the bit was set, set LSb for call.
+            LDR     r0, 01h
+        WAK
+        BL      Buffer_1_Bit
+    WAK
+    ;B       OUTPUT_SUB_LIST_NEXT
+
+OUTPUT_SUB_LIST_NEXT:
+
+    ADD     r3, 1
+    B       OUTPUT_SUB_LIST_LOOP
+
+OUTPUT_SUB_LIST_END:
+
+    BX
+
+  
+
+;-------------------------------------------------------------------------------                                        
+; Buffer_1_Bit
+;
+; Inputs:
+; 
+;   r0          The bit, in the LSb.
+;
+;-------------------------------------------------------------------------------                                        
+
+Buffer_1_Bit:
+
+    AND     r0, 01h
+
+    LDR     r1, data_buf
+    LSL     r1
+    ORR     r1, r0
+    STR     r1, data_buf
+
+    LDR     r1, data_buf_len
+    ADD     r1, 1
+    STR     r1, data_buf_len
+    CMP     r1, 8
+    BHS     BUFFER_1_BIT_OUTPUT    ; Skip output if no NPs need to.
+    B       BUFFER_1_BIT_END
+
+BUFFER_1_BIT_OUTPUT:
+
+    ZLO
+        OUT     data_buf, 0
+        OUT     data_buf, 1
+        OUT     data_buf, 2
+        OUT     data_buf, 3
+        OUT     data_buf, 4
+        OUT     data_buf, 5
+        OUT     data_buf, 6
+        OUT     data_buf, 7
+        LDR     r1, 0
+        STR     r1, data_buf_len
+    WAK
+    ;B   BUFFER_1_BIT_END
+
+BUFFER_1_BIT_END:
+
+    BX
+        
+
+
+;-------------------------------------------------------------------------------
+; Output_Data_Block
+;
+; Description:
+;
+;   The output function, which dumps 64 bytes of data out through the column
+;   data bus.  This can be called with different starting addresses to determine
+;   whether X, Y, Z or some other block is output.
+;
+; Inputs:
+;
+;   r0          The address to begin outputing.  The last byte will be output
+;               from address r0+63.
+;
+; Outputs:
+;
+;   -           64 bytes for each NP on column data bus.
+;
+; Registers Modified:
+;
+;   r0, r1
+;-------------------------------------------------------------------------------
+
+Output_Data_Block:
+
+    LDR     r1, r0          ; Calculate the final address.
+    ADD     r1, 64      
+
+OUTPUT_DATA_BLOCK_LOOP:
+
+    OUT     [r0], 0          ; Row 0
+    OUT     [r0], 1          ; Row 1
+    OUT     [r0], 2          ; Row 2
+    OUT     [r0], 3          ; Row 3
+    OUT     [r0], 4          ; Row 4
+    OUT     [r0], 5          ; Row 5
+    OUT     [r0], 6          ; Row 6
+    OUT     [r0], 7          ; Row 7
+    
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+    BX 

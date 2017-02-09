@@ -1,0 +1,53 @@
+ 0 000h |                         | ;-------------------------------------------------------------------------------
+ 0 000h |                         | ; power-test-basic.npasm
+ 0 000h |                         | ;-------------------------------------------------------------------------------
+ 0 000h |                         | 
+ 0 000h |                         | ; Tests the sleep mode power consumption of the NP array in PIRANHA.  Disables
+ 0 000h |                         | ; exactly the number of NPs specified by SLEEPY_NPS and the remaining ones run a
+ 0 000h |                         | ; simple code loop infinitely to allow for easy power measurement.  The only
+ 0 000h |                         | ; tricky part is calculating whether or not a given NP should be put to sleep
+ 0 000h |                         | ; based on its row-column register (RCR).
+ 0 000h |                         | ;
+ 0 000h |                         | ; RCR Format : RRRRCCCC where RRRR and CCCC are between 0-15
+ 0 000h |                         | ; Examples:    NP(0,0) = 0x00 NP(0,1) = 0x01 ... NP(0,15) = 0x0F
+ 0 000h |                         | ;              NP(1,0) = 0x10 NP(1,1) = 0x11 ... NP(1,15) = 0x1F
+ 0 000h |                         | ;
+ 0 000h |                         | ; Since PIRANHA has less than the maximum 16x16 NP array, the RCR does not
+ 0 000h |                         | ; increase uniformly moving across the array (it jumps at each new row).
+ 0 000h |                         | 
+ 0 000h |                         | #define MASK_AF        01000000b   ; Mask for ADC active flag
+ 0 000h |                         | #define BZ             BEQ         ; Alias branch if zero to branch if equal
+ 0 000h |                         | #define BNZ            BNE         ; Alias branch if not zero to branch if not equal
+ 0 000h |                         | #define START_OF_X     00000000b   ; Start address of X RAM
+ 0 000h |                         | #define START_OF_Y     01000000b   ; Start address of X RAM
+ 0 000h |                         | #define START_OF_Z     10000000b   ; Start address of X RAM
+ 0 000h |                         | #define NUM_NP_COL     10          ; Number of columns of NPs in the array
+ 0 000h |                         | #define NUM_NP_ROW     8           ; Number of rows of NPs in the array
+ 0 000h |                         | 
+ 0 000h |                         | #define SHEEP          r3          ; Register to hold sheep count
+ 0 000h |                         | #define SLEEPY_NPS     79          ; # of NPs to put to sleep, 0-80
+ 0 000h |                         | 
+ 0 000h |                         | START:
+ 0 000h |                         | 
+ 0 000h | 8280h 1000001010000000b |     NOP                     ; Add dummy cycle since imaging immediately on 
+ 1 001h |                         |                             ;   reset is awkward for simulation purposes.
+ 1 001h |                         | 
+ 1 001h |                         | GOODNIGHT_NPS:
+ 1 001h |                         | 
+ 1 001h |                         |     ; Is this NP's RCR below the cutoff RCR threshold?  First find the number
+ 1 001h |                         |     ; of full rows that need disabled (using integer division) then the number of
+ 1 001h |                         |     ; additional NPs in the final partial row (using modulo) to reach the desired
+ 1 001h |                         |     ; target.  Be sure to use unsigned comparisons.
+ 1 001h |                         | 
+ 1 001h | 40F8h 0100000011111000b |     LDR     r0, RCR
+ 2 002h | 3979h 0011100101111001b |     CMP     r0, {((SLEEPY_NPS / NUM_NP_COL) << 4) + (SLEEPY_NPS % NUM_NP_COL)}
+ 3 003h | 900Bh 1001000000001011b |     ZLT
+ 4 004h |                         | 
+ 4 004h |                         | SWEET_DREAMS:
+ 4 004h |                         | 
+ 4 004h |                         |         ; Those NPs whom can't get to sleep count sheep.  We don't need to init
+ 4 004h |                         |         ; this variable since we don't care what value it starts at.
+ 4 004h | 0701h 0000011100000001b |         ADD     SHEEP, 1
+ 5 005h | C04Fh 1100000001001111b |         B       SWEET_DREAMS
+ 6 006h |                         | 
+ 6 006h |                         | ; No WAK since this infinite loops

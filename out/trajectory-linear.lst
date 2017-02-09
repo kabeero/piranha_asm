@@ -1,0 +1,728 @@
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | ; trajectory.npasm
+  0 000h |                         | ;
+  0 000h |                         | ; this code is mostly the same as tracking-embed.npasm
+  0 000h |                         | ;
+  0 000h |                         | ; this will be used as the basis for trajectory.npasm because it does
+  0 000h |                         | ; not use Z memory heavily for CDS storage.
+  0 000h |                         | ;
+  0 000h |                         | ; the goal is to estimate the current path with dy / dx and offset, and
+  0 000h |                         | ; predict the next positions
+  0 000h |                         | ;
+  0 000h |                         | ; Z memory stores:
+  0 000h |                         | ;   dx up to 5 points
+  0 000h |                         | ;   dy up to 5 points
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | 
+  0 000h |                         | ; Define new instruction labels to make the code intuitive to read.
+  0 000h |                         | 
+  0 000h |                         | #define PXL_ROW_MASK    00111000b   ; The row bits for pixels
+  0 000h |                         | #define PXL_COL_MASK    00000111b   ; The column bits for pixels
+  0 000h |                         | 
+  0 000h |                         | #define PXL_EDGE_N      00000000b   ; Matches pixels on N edge of NP
+  0 000h |                         | #define PXL_EDGE_S      00111000b   ; Matches pixels on S edge of NP
+  0 000h |                         | #define PXL_EDGE_W      00000000b   ; Matches pixels on W edge of NP
+  0 000h |                         | #define PXL_EDGE_E      00000111b   ; Matches pixels on E edge of NP
+  0 000h |                         |  
+  0 000h |                         | #define START_OF_X      00000000b   ; Starting address of X RAM.
+  0 000h |                         | #define START_OF_Y      01000000b   ; Starting address of Y RAM.
+  0 000h |                         | #define START_OF_Z      10000000b   ; Starting address of Z RAM.
+  0 000h |                         | #define START_OF_V      11000000b   ; Starting address of V RAM.
+  0 000h |                         |  
+  0 000h |                         | #define NUM_PIXELS      64          ; The number of pixels in the NP.
+  0 000h |                         | #define MASK_AF         01000000b   ; Mask for ADC active flag
+  0 000h |                         | #define MASK_NF         00000100b   ; Mask for negative flag
+  0 000h |                         | 
+  0 000h |                         | ; Algorithm constants.
+  0 000h |                         | 
+  0 000h |                         | #define THRESHOLD       16          ; Min frame diff. before detection
+  0 000h |                         | 
+  0 000h |                         | ; Algorithm variables.
+  0 000h |                         |  
+  0 000h |                         | #define index           r0          ; The current pixel index 0..63
+  0 000h |                         | #define pxlr            r2          ; The current pixel row 0..7
+  0 000h |                         | #define pxlc            r3          ; The current pixel column 0..7
+  0 000h |                         |                            
+  0 000h |                         | #define NULL_BB         0           ; Indicates no bounding box found
+  0 000h |                         | 
+  0 000h |                         | #define xmin            z[0]        ; Motion bounding box NW corner x
+  0 000h |                         | #define ymin            z[1]        ; Motion bounding box NW corner y
+  0 000h |                         | #define xmax            z[2]        ; Motion bounding box SE corner x
+  0 000h |                         | #define ymax            z[3]        ; Motion bounding box SE corner y
+  0 000h |                         |              
+  0 000h |                         | #define xmin_in         z[4]        ; Motion bounding box NW corner x
+  0 000h |                         | #define ymin_in         z[5]        ; Motion bounding box NW corner y
+  0 000h |                         | #define xmax_in         z[6]        ; Motion bounding box SE corner x
+  0 000h |                         | #define ymax_in         z[7]        ; Motion bounding box SE corner y
+  0 000h |                         | 
+  0 000h |                         | #define coord_pointer   v0          ; Address to save coordinate pairs
+  0 000h |                         |              
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         |       
+  0 000h |                         | ; Zeroes all of Z memory where the data is stored.  This isn't required,
+  0 000h |                         | ; but it makes the output easier to debug.
+  0 000h |                         |          
+  0 000h |                         | CLEAR_HIST:
+  0 000h |                         | 
+  0 000h |                         | CLEAR_HIST_INIT:
+  0 000h |                         | 
+  0 000h | 4180h 0100000110000000b |     LDR     r0, START_OF_Z
+  1 001h | 4300h 0100001100000000b |     LDR     r1, 0
+  2 002h |                         | 
+  2 002h |                         | CLEAR_HIST_LOOP:
+  2 002h |                         | 
+  2 002h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+  3 003h | 0101h 0000000100000001b |     ADD     r0, 1
+  4 004h | 39C0h 0011100111000000b |     CMP     r0, {START_OF_Z + NUM_PIXELS}
+  5 005h | C023h 1100000000100011b |     BLO     CLEAR_HIST_LOOP
+  6 006h |                         | 
+  6 006h |                         | INIT_COORD_PTR:
+  6 006h |                         |                                           
+  6 006h | 4188h 0100000110001000b |     LDR     r0, {START_OF_Z + 8} ; Store coordinates in Z, skipping min/max vars
+  7 007h | 48C0h 0100100011000000b |     STR     r0, coord_pointer
+  8 008h |                         | 
+  8 008h |                         | ;-------------------------------------------------------------------------------
+  8 008h |                         |  
+  8 008h |                         | START:
+  8 008h |                         |      
+  8 008h |                         | ; Set the image memory to a consistent value to make it clearer when pixels are 
+  8 008h |                         | ; not triggering properly.
+  8 008h |                         |                                           
+  8 008h |                         | CLEAN_SLATE_INIT:
+  8 008h |                         |  
+  8 008h | 4100h 0100000100000000b |     LDR     r0, START_OF_X  ; Overwrite x ram with constant (note this is in gray code)
+  9 009h | 4500h 0100010100000000b |     LDR     r2, 00h      
+ 10 00Ah | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address
+ 11 00Bh | 0340h 0000001101000000b |     ADD     r1, NUM_PIXELS 
+ 12 00Ch |                         | 
+ 12 00Ch |                         | CLEAN_SLATE_LOOP:
+ 12 00Ch |                         | 
+ 12 00Ch | 4CF0h 0100110011110000b |     STR     r2, [r0]
+ 13 00Dh | 0101h 0000000100000001b |     ADD     r0, 1
+ 14 00Eh | 38D1h 0011100011010001b |     CMP     r0, r1
+ 15 00Fh | C0C3h 1100000011000011b |     BLO     CLEAN_SLATE_LOOP
+ 16 010h |                         |  
+ 16 010h |                         | ACQUIRE_IMAGE:
+ 16 010h |                         | 
+ 16 010h | 8220h 1000001000100000b |     IMG                     ; Acquire a new image from the ADCs
+ 17 011h |                         | 
+ 17 011h |                         | WAIT_FOR_ADC:
+ 17 011h |                         | 
+ 17 011h |                         |     ; At this point, the FSM for the ADC is running.  Read the status register
+ 17 011h |                         |     ; to check if the conversion is finished. (Note: very inefficient)
+ 17 011h |                         | 
+ 17 011h | 40F4h 0100000011110100b |     LDR     r0, SR          ; Load the status register
+ 18 012h | 2140h 0010000101000000b |     AND     r0, MASK_AF     ; Check if the ADC is active
+ 19 013h | C111h 1100000100010001b |     BNZ     WAIT_FOR_ADC    ; Loop while the ADC is converting
+ 20 014h |                         |      
+ 20 014h |                         | CONVERT_TO_BINARY:
+ 20 014h |                         |     
+ 20 014h | 4100h 0100000100000000b |     LDR     r0, START_OF_X  ; Start of image
+ 21 015h | 42D0h 0100001011010000b |     LDR     r1, r0
+ 22 016h | 0340h 0000001101000000b |     ADD     r1, NUM_PIXELS  ; End of image
+ 23 017h |                         | 
+ 23 017h |                         | CONVERT_TO_BINARY_LOOP:
+ 23 017h |                         | 
+ 23 017h | 44F0h 0100010011110000b |     LDR     r2, [r0]    ; Convert gray to binary code
+ 24 018h | 8C20h 1000110000100000b |     GTB     r2
+ 25 019h | 4CF0h 0100110011110000b |     STR     r2, [r0]
+ 26 01Ah | 0101h 0000000100000001b |     ADD     r0, 1
+ 27 01Bh | 38D1h 0011100011010001b |     CMP     r0, r1
+ 28 01Ch | C171h 1100000101110001b |     BNE     CONVERT_TO_BINARY_LOOP
+ 29 01Dh |                         |  
+ 29 01Dh |                         | CONVERT_TO_SIGNED:
+ 29 01Dh |                         | 
+ 29 01Dh |                         | CONVERT_TO_SIGNED_INIT:
+ 29 01Dh |                         | 
+ 29 01Dh | 4100h 0100000100000000b |     LDR     r0, START_OF_X
+ 30 01Eh |                         | 
+ 30 01Eh |                         | CONVERT_TO_SIGNED_LOOP:
+ 30 01Eh |                         | 
+ 30 01Eh | 42F0h 0100001011110000b |     LDR     r1, [r0]
+ 31 01Fh | 8A40h 1000101001000000b |     LSR     r1          ; Max value is +127 now
+ 32 020h | 4AF0h 0100101011110000b |     STR     r1, [r0]
+ 33 021h | 0101h 0000000100000001b |     ADD     r0, 1
+ 34 022h | 3940h 0011100101000000b |     CMP     r0, NUM_PIXELS
+ 35 023h | C1E3h 1100000111100011b |     BLO     CONVERT_TO_SIGNED_LOOP
+ 36 024h |                         |  
+ 36 024h |                         | ;-------------------------------------------------------------------------------
+ 36 024h |                         |  
+ 36 024h |                         | ; Iterate through every pixel in the new image (in X) and subtract the old, 
+ 36 024h |                         | ; previous image (in Y).  The math here is signed since differences can be 
+ 36 024h |                         | ; positive or negative.  Because of this, images are always divided by a factor 
+ 36 024h |                         | ; of two in order to prevent overflow during math operations.  The previous 
+ 36 024h |                         | ; frame is stored in this signed representation as well.
+ 36 024h |                         |  
+ 36 024h |                         | FRAME_DIFFERENCE:
+ 36 024h |                         | 
+ 36 024h |                         | FD_LOOP_INIT:
+ 36 024h |                         |  
+ 36 024h |                         |     ; Store bounding box coordinates for this NP in V memory.
+ 36 024h |                         | 
+ 36 024h | 4100h 0100000100000000b |     LDR r0, 0           ; Clear coordinates, 0 is reserved for NULL
+ 37 025h | 4880h 0100100010000000b |     STR r0, xmin
+ 38 026h | 4881h 0100100010000001b |     STR r0, ymin
+ 39 027h | 4882h 0100100010000010b |     STR r0, xmax
+ 40 028h | 4883h 0100100010000011b |     STR r0, ymax
+ 41 029h |                         |                                          
+ 41 029h | 4100h 0100000100000000b |     LDR index, START_OF_X      ; Initialize index variables
+ 42 02Ah |                         |                           
+ 42 02Ah |                         | FD_LOOP:
+ 42 02Ah |                         | 
+ 42 02Ah | 46D0h 0100011011010000b |     LDR     pxlc, index         ; Update row/column variables
+ 43 02Bh | 2707h 0010011100000111b |     AND     pxlc, PXL_COL_MASK
+ 44 02Ch | 0701h 0000011100000001b |     ADD     pxlc, 1             ; C/R numbered from 1-8 since 0 is NULL
+ 45 02Dh | 44D0h 0100010011010000b |     LDR     pxlr, index
+ 46 02Eh | 8C40h 1000110001000000b |     LSR     pxlr
+ 47 02Fh | 8C40h 1000110001000000b |     LSR     pxlr
+ 48 030h | 8C40h 1000110001000000b |     LSR     pxlr
+ 49 031h | 0501h 0000010100000001b |     ADD     pxlr, 1             ; C/R numbered from 1-8 since 0 is NULL
+ 50 032h |                         | 
+ 50 032h | 42F0h 0100001011110000b |     LDR     r1, [r0]        ; Load the new pixel value
+ 51 033h | 0140h 0000000101000000b |     ADD     r0, START_OF_Y  ; Find correspond Y pixel
+ 52 034h | 12F0h 0001001011110000b |     SUB     r1, [r0]        ; signed(new) - signed(old)
+ 53 035h | 9005h 1001000000000101b |     ZPL                     ; If negative, negate to find absolute value
+ 54 036h | 33FFh 0011001111111111b |         EOR     r1, FFh     ; For two's compliment, xor(x, FFh)+1 = -x
+ 55 037h | 0301h 0000001100000001b |         ADD     r1, 1
+ 56 038h | 8240h 1000001001000000b |     WAK
+ 57 039h | 3B10h 0011101100010000b |     CMP     r1, THRESHOLD   ; Binarize image based on threshold
+ 58 03Ah | 9003h 1001000000000011b |     ZLO
+ 59 03Bh | 43FFh 0100001111111111b |         LDR     r1, 255     ; This makes it easier to debug, but is not req'd
+ 60 03Ch | 4AF0h 0100101011110000b |         STR     r1, [r0]
+ 61 03Dh | 4280h 0100001010000000b |         LDR     r1, xmin    ; Check if x/y min/max variables are NULL
+ 62 03Eh | 3B00h 0011101100000000b |         CMP     r1, 0    
+ 63 03Fh | 9001h 1001000000000001b |         ZNE                         ; NPs where this is the 1st detection, so
+ 64 040h | 4E80h 0100111010000000b |             STR     pxlc, xmin      ;   this pixel is the min and max
+ 65 041h | 4C81h 0100110010000001b |             STR     pxlr, ymin
+ 66 042h | 4E82h 0100111010000010b |             STR     pxlc, xmax
+ 67 043h | 4C83h 0100110010000011b |             STR     pxlr, ymax
+ 68 044h | 8240h 1000001001000000b |         WAK
+ 69 045h | 9000h 1001000000000000b |         ZEQ                         ; Execute if current values are valid
+ 70 046h | 3E80h 0011111010000000b |             CMP     pxlc, xmin      ; Is this the min x encountered?
+ 71 047h | 900Ah 1001000000001010b |             ZGE
+ 72 048h | 4E80h 0100111010000000b |                 STR     pxlc, xmin
+ 73 049h | 8240h 1000001001000000b |             WAK
+ 74 04Ah | 3C81h 0011110010000001b |             CMP     pxlr, ymin      ; Is this the min y encountered?
+ 75 04Bh | 900Ah 1001000000001010b |             ZGE
+ 76 04Ch | 4C81h 0100110010000001b |                 STR     pxlr, ymin
+ 77 04Dh | 8240h 1000001001000000b |             WAK
+ 78 04Eh | 3E82h 0011111010000010b |             CMP     pxlc, xmax      ; Is this the max x encountered?
+ 79 04Fh | 900Dh 1001000000001101b |             ZLE
+ 80 050h | 4E82h 0100111010000010b |                 STR     pxlc, xmax
+ 81 051h | 8240h 1000001001000000b |             WAK
+ 82 052h | 3C83h 0011110010000011b |             CMP     pxlr, ymax      ; Is this the max y encountered?
+ 83 053h | 900Dh 1001000000001101b |             ZLE
+ 84 054h | 4C83h 0100110010000011b |                 STR     pxlr, ymax
+ 85 055h | 8240h 1000001001000000b |             WAK
+ 86 056h | 8240h 1000001001000000b |         WAK
+ 87 057h | 8240h 1000001001000000b |     WAK
+ 88 058h |                         | 
+ 88 058h |                         | FD_LOOP_UPDATE:
+ 88 058h |                         | 
+ 88 058h | 01C1h 0000000111000001b |     ADD     r0, {1 - START_OF_Y}  ; Return to the next pixel in X RAM
+ 89 059h | 3940h 0011100101000000b |     CMP     r0, NUM_PIXELS
+ 90 05Ah | C2ABh 1100001010101011b |     BLT     FD_LOOP
+ 91 05Bh |                         |                          
+ 91 05Bh |                         | ;-------------------------------------------------------------------------------
+ 91 05Bh |                         | 
+ 91 05Bh |                         | COMBINE_BOUNDING_BOXES:
+ 91 05Bh |                         |      
+ 91 05Bh |                         | CBB_ROW:
+ 91 05Bh |                         | 
+ 91 05Bh |                         | CBB_ROW_INIT:
+ 91 05Bh |                         | 
+ 91 05Bh | 4707h 0100011100000111b |     LDR     r3, 7       ; Number of shifts to perform, #ROWS-1
+ 92 05Ch |                         | 
+ 92 05Ch |                         | CBB_ROW_LOOP:
+ 92 05Ch |                         | 
+ 92 05Ch |                         |     ; When combining bounding boxes, several cases may occur:
+ 92 05Ch |                         |     ;
+ 92 05Ch |                         |     ;   1.  Both this NP and the one downstream have NULL coordinate pairs.  In
+ 92 05Ch |                         |     ;       this case, the coordinate pairs should remain NULL
+ 92 05Ch |                         |     ;
+ 92 05Ch |                         |     ;   2.  This NP has NULL data, but the upstream NP has valid data.  In this
+ 92 05Ch |                         |     ;       case, the incoming coordinate pairs should overwrite the local ones.
+ 92 05Ch |                         |     ;
+ 92 05Ch |                         |     ;   3.  This NP has valid data, but the upstream NP does not.  In this case,
+ 92 05Ch |                         |     ;       the coordinate pairs should not be modified.
+ 92 05Ch |                         |     ;
+ 92 05Ch |                         |     ;   4.  Both this NP and the downstream NP have valid coordinate data.  Each
+ 92 05Ch |                         |     ;       coordinate pair must be compared and the more inclusive one saved.
+ 92 05Ch |                         |     ;
+ 92 05Ch |                         |     ; NOTE: When an NP is asleep, it will not write any data to memory or 
+ 92 05Ch |                         |     ;       registers, so any data that needs to be access from a sleeping
+ 92 05Ch |                         |     ;       NP through the NSWE data bus must already be loaded in r0..r3.
+ 92 05Ch |                         | 
+ 92 05Ch |                         |     ; Copy incoming coordinates locally to prevent NPs from receiving 
+ 92 05Ch |                         |     ; out-of-sync data.
+ 92 05Ch |                         | 
+ 92 05Ch | 4080h 0100000010000000b |     LDR     r0, xmin
+ 93 05Dh | 40E2h 0100000011100010b |     LDR     r0, S
+ 94 05Eh | 4884h 0100100010000100b |     STR     r0, xmin_in
+ 95 05Fh |                         | 
+ 95 05Fh | 4081h 0100000010000001b |     LDR     r0, ymin
+ 96 060h | 40E2h 0100000011100010b |     LDR     r0, S
+ 97 061h | 4885h 0100100010000101b |     STR     r0, ymin_in
+ 98 062h |                         | 
+ 98 062h | 4082h 0100000010000010b |     LDR     r0, xmax
+ 99 063h | 40E2h 0100000011100010b |     LDR     r0, S
+100 064h | 4886h 0100100010000110b |     STR     r0, xmax_in
+101 065h |                         | 
+101 065h | 4083h 0100000010000011b |     LDR     r0, ymax
+102 066h | 40E2h 0100000011100010b |     LDR     r0, S
+103 067h | 4887h 0100100010000111b |     STR     r0, ymax_in
+104 068h |                         | 
+104 068h |                         |     ; First check if the incoming BB coords are NULL.  If so, the NP will should
+104 068h |                         |     ; disregard any incoming coordinates, since they are uninitialized.  It goes
+104 068h |                         |     ; to sleep for this loop cycle.
+104 068h |                         |       
+104 068h | 4084h 0100000010000100b |     LDR     r0, xmin_in     ; Check if the coords are NULL in the other NP    
+105 069h | 3900h 0011100100000000b |     CMP     r0, NULL_BB
+106 06Ah | 9000h 1001000000000000b |     ZEQ
+107 06Bh |                         |  
+107 06Bh |                         |         ; If this NP already found motion pixels itself, it needs to compare 
+107 06Bh |                         |         ; the coords of its own internal bounding box to those it receives to
+107 06Bh |                         |         ; create a new BB that encloses both BBs.
+107 06Bh |                         | 
+107 06Bh | 4080h 0100000010000000b |         LDR     r0, xmin
+108 06Ch | 3900h 0011100100000000b |         CMP     r0, NULL_BB
+109 06Dh | 9000h 1001000000000000b |         ZEQ
+110 06Eh |                         |             ; xmin
+110 06Eh |                         | 
+110 06Eh | 4084h 0100000010000100b |             LDR     r0, xmin_in
+111 06Fh | 3880h 0011100010000000b |             CMP     r0, xmin        ; Compare it to this NP's value
+112 070h | 9002h 1001000000000010b |             ZHS
+113 071h | 4880h 0100100010000000b |                 STR     r0, xmin    ; If lower, save it as the new minimum
+114 072h | 8240h 1000001001000000b |             WAK
+115 073h |                         | 
+115 073h |                         |             ; ymin
+115 073h |                         | 
+115 073h | 4085h 0100000010000101b |             LDR     r0, ymin_in
+116 074h | 0108h 0000000100001000b |             ADD     r0, 8           ; Add offset since S NP starts 8 rows higher
+117 075h | 3881h 0011100010000001b |             CMP     r0, ymin        ; Compare it to this NP's value
+118 076h | 9002h 1001000000000010b |             ZHS
+119 077h | 4881h 0100100010000001b |                 STR     r0, ymin    ; If lower, save it as the new minimum
+120 078h | 8240h 1000001001000000b |             WAK
+121 079h |                         |                   
+121 079h |                         |             ; xmax
+121 079h |                         | 
+121 079h | 4086h 0100000010000110b |             LDR     r0, xmax_in
+122 07Ah | 3882h 0011100010000010b |             CMP     r0, xmax        ; Compare it to this NP's value
+123 07Bh | 9009h 1001000000001001b |             ZLS
+124 07Ch | 4882h 0100100010000010b |                 STR     r0, xmax    ; If higher, save it as the new maximum
+125 07Dh | 8240h 1000001001000000b |             WAK
+126 07Eh |                         | 
+126 07Eh |                         |             ; ymin
+126 07Eh |                         |              
+126 07Eh | 4087h 0100000010000111b |             LDR     r0, ymax_in
+127 07Fh | 0108h 0000000100001000b |             ADD     r0, 8           ; Add offset since S NP starts 8 rows higher
+128 080h | 3883h 0011100010000011b |             CMP     r0, ymax        ; Compare it to this NP's value
+129 081h | 9009h 1001000000001001b |             ZLS
+130 082h | 4883h 0100100010000011b |                 STR     r0, ymax    ; If higher, save it as the new maximum
+131 083h | 8240h 1000001001000000b |             WAK
+132 084h | 8240h 1000001001000000b |         WAK  
+133 085h |                         | 
+133 085h |                         |         ; Next check if this NP found any motion pixels in itself.  If not, all 
+133 085h |                         |         ; of its x/y min/max entires will be NULL/0 and it can assume the 
+133 085h |                         |         ; incoming bounding box will enclose its own, as it has none.  So, all
+133 085h |                         |         ; incoming values are accepted without comparison.
+133 085h |                         |         ;
+133 085h |                         |         ; NOTE: Since NPs with NULL values where asleep before, this CMP is 
+133 085h |                         |         ;       valid for them even though the code above does modify some NPs.
+133 085h |                         | 
+133 085h | 4080h 0100000010000000b |         LDR     r0, xmin
+134 086h | 3900h 0011100100000000b |         CMP     r0, NULL_BB
+135 087h | 9001h 1001000000000001b |         ZNE                     ; If NULL, use incoming coordinates always
+136 088h | 4084h 0100000010000100b |             LDR     r0, xmin_in
+137 089h | 4880h 0100100010000000b |             STR     r0, xmin
+138 08Ah | 4085h 0100000010000101b |             LDR     r0, ymin_in
+139 08Bh | 0108h 0000000100001000b |             ADD     r0, 8       ; Add offset since S NP starts 8 rows higher
+140 08Ch | 4881h 0100100010000001b |             STR     r0, ymin
+141 08Dh | 4086h 0100000010000110b |             LDR     r0, xmax_in
+142 08Eh | 4882h 0100100010000010b |             STR     r0, xmax
+143 08Fh | 4087h 0100000010000111b |             LDR     r0, ymax_in
+144 090h | 0108h 0000000100001000b |             ADD     r0, 8       ; Add offset since S NP starts 8 rows higher
+145 091h | 4883h 0100100010000011b |             STR     r0, ymax
+146 092h | 8240h 1000001001000000b |         WAK
+147 093h | 8240h 1000001001000000b |     WAK
+148 094h |                         | 
+148 094h |                         | CBB_ROW_LOOP_CONDITION:
+148 094h |                         | 
+148 094h | 1701h 0001011100000001b |     SUB     r3, 1               ; Indicate an additional shift is complete
+149 095h | C5C1h 1100010111000001b |     BNZ     CBB_ROW_LOOP
+150 096h |                         | 
+150 096h |                         | ;-------------------------------------------------------------------------------
+150 096h |                         |       
+150 096h |                         | CBB_COL:
+150 096h |                         | 
+150 096h |                         | CBB_COL_INIT:
+150 096h |                         | 
+150 096h | 4709h 0100011100001001b |     LDR     r3, 9       ; Number of shifts to perform, #COLS-1
+151 097h |                         | 
+151 097h |                         | CBB_COL_LOOP:
+151 097h |                         | 
+151 097h |                         |     ; When combining bounding boxes, several cases may occur:
+151 097h |                         |     ;
+151 097h |                         |     ;   1.  Both this NP and the one downstream have NULL coordinate pairs.  In
+151 097h |                         |     ;       this case, the coordinate pairs should remain NULL
+151 097h |                         |     ;
+151 097h |                         |     ;   2.  This NP has NULL data, but the upstream NP has valid data.  In this
+151 097h |                         |     ;       case, the incoming coordinate pairs should overwrite the local ones.
+151 097h |                         |     ;
+151 097h |                         |     ;   3.  This NP has valid data, but the upstream NP does not.  In this case,
+151 097h |                         |     ;       the coordinate pairs should not be modified.
+151 097h |                         |     ;
+151 097h |                         |     ;   4.  Both this NP and the downstream NP have valid coordinate data.  Each
+151 097h |                         |     ;       coordinate pair must be compared and the more inclusive one saved.
+151 097h |                         |     ;
+151 097h |                         |     ; NOTE: When an NP is asleep, it will not write any data to memory or 
+151 097h |                         |     ;       registers, so any data that needs to be access from a sleeping
+151 097h |                         |     ;       NP through the NSWE data bus must already be loaded in r0..r3.
+151 097h |                         | 
+151 097h |                         |     ; Copy incoming coordinates locally to prevent NPs from receiving 
+151 097h |                         |     ; out-of-sync data.
+151 097h |                         | 
+151 097h | 4080h 0100000010000000b |     LDR     r0, xmin
+152 098h | 40E8h 0100000011101000b |     LDR     r0, E
+153 099h | 4884h 0100100010000100b |     STR     r0, xmin_in
+154 09Ah |                         | 
+154 09Ah | 4081h 0100000010000001b |     LDR     r0, ymin
+155 09Bh | 40E8h 0100000011101000b |     LDR     r0, E
+156 09Ch | 4885h 0100100010000101b |     STR     r0, ymin_in
+157 09Dh |                         | 
+157 09Dh | 4082h 0100000010000010b |     LDR     r0, xmax
+158 09Eh | 40E8h 0100000011101000b |     LDR     r0, E
+159 09Fh | 4886h 0100100010000110b |     STR     r0, xmax_in
+160 0A0h |                         | 
+160 0A0h | 4083h 0100000010000011b |     LDR     r0, ymax
+161 0A1h | 40E8h 0100000011101000b |     LDR     r0, E
+162 0A2h | 4887h 0100100010000111b |     STR     r0, ymax_in
+163 0A3h |                         | 
+163 0A3h |                         |     ; First check if the incoming BB coords are NULL.  If so, the NP will should
+163 0A3h |                         |     ; disregard any incoming coordinates, since they are uninitialized.  It goes
+163 0A3h |                         |     ; to sleep for this loop cycle.
+163 0A3h |                         |       
+163 0A3h | 4084h 0100000010000100b |     LDR     r0, xmin_in     ; Check if the coords are NULL in the other NP    
+164 0A4h | 3900h 0011100100000000b |     CMP     r0, NULL_BB
+165 0A5h | 9000h 1001000000000000b |     ZEQ
+166 0A6h |                         |  
+166 0A6h |                         |         ; If this NP already found motion pixels itself, it needs to compare 
+166 0A6h |                         |         ; the coords of its own internal bounding box to those it receives to
+166 0A6h |                         |         ; create a new BB that encloses both BBs.
+166 0A6h |                         | 
+166 0A6h | 4080h 0100000010000000b |         LDR     r0, xmin
+167 0A7h | 3900h 0011100100000000b |         CMP     r0, NULL_BB
+168 0A8h | 9000h 1001000000000000b |         ZEQ
+169 0A9h |                         |             ; xmin
+169 0A9h |                         | 
+169 0A9h | 4084h 0100000010000100b |             LDR     r0, xmin_in
+170 0AAh | 0108h 0000000100001000b |             ADD     r0, 8           ; Add offset since E NP starts 8 cols higher
+171 0ABh | 3880h 0011100010000000b |             CMP     r0, xmin        ; Compare it to this NP's value
+172 0ACh | 9002h 1001000000000010b |             ZHS
+173 0ADh | 4880h 0100100010000000b |                 STR     r0, xmin    ; If lower, save it as the new minimum
+174 0AEh | 8240h 1000001001000000b |             WAK
+175 0AFh |                         | 
+175 0AFh |                         |             ; ymin
+175 0AFh |                         | 
+175 0AFh | 4085h 0100000010000101b |             LDR     r0, ymin_in
+176 0B0h | 3881h 0011100010000001b |             CMP     r0, ymin        ; Compare it to this NP's value
+177 0B1h | 9002h 1001000000000010b |             ZHS
+178 0B2h | 4881h 0100100010000001b |                 STR     r0, ymin    ; If lower, save it as the new minimum
+179 0B3h | 8240h 1000001001000000b |             WAK
+180 0B4h |                         |                   
+180 0B4h |                         |             ; xmax
+180 0B4h |                         | 
+180 0B4h | 4086h 0100000010000110b |             LDR     r0, xmax_in
+181 0B5h | 0108h 0000000100001000b |             ADD     r0, 8           ; Add offset since E NP starts 8 cols higher
+182 0B6h | 3882h 0011100010000010b |             CMP     r0, xmax        ; Compare it to this NP's value
+183 0B7h | 9009h 1001000000001001b |             ZLS
+184 0B8h | 4882h 0100100010000010b |                 STR     r0, xmax    ; If higher, save it as the new maximum
+185 0B9h | 8240h 1000001001000000b |             WAK
+186 0BAh |                         | 
+186 0BAh |                         |             ; ymin
+186 0BAh |                         |              
+186 0BAh | 4087h 0100000010000111b |             LDR     r0, ymax_in
+187 0BBh | 3883h 0011100010000011b |             CMP     r0, ymax        ; Compare it to this NP's value
+188 0BCh | 9009h 1001000000001001b |             ZLS
+189 0BDh | 4883h 0100100010000011b |                 STR     r0, ymax    ; If higher, save it as the new maximum
+190 0BEh | 8240h 1000001001000000b |             WAK
+191 0BFh | 8240h 1000001001000000b |         WAK  
+192 0C0h |                         | 
+192 0C0h |                         |         ; Next check if this NP found any motion pixels in itself.  If not, all 
+192 0C0h |                         |         ; of its x/y min/max entires will be NULL/0 and it can assume the 
+192 0C0h |                         |         ; incoming bounding box will enclose its own, as it has none.  So, all
+192 0C0h |                         |         ; incoming values are accepted without comparison.
+192 0C0h |                         |         ;
+192 0C0h |                         |         ; NOTE: Since NPs with NULL values where asleep before, this CMP is 
+192 0C0h |                         |         ;       valid for them even though the code above does modify some NPs.
+192 0C0h |                         | 
+192 0C0h | 4080h 0100000010000000b |         LDR     r0, xmin
+193 0C1h | 3900h 0011100100000000b |         CMP     r0, NULL_BB
+194 0C2h | 9001h 1001000000000001b |         ZNE                     ; If NULL, use incoming coordinates always
+195 0C3h | 4084h 0100000010000100b |             LDR     r0, xmin_in
+196 0C4h | 0108h 0000000100001000b |             ADD     r0, 8       ; Add offset since E NP starts 8 cols higher
+197 0C5h | 4880h 0100100010000000b |             STR     r0, xmin
+198 0C6h | 4085h 0100000010000101b |             LDR     r0, ymin_in
+199 0C7h | 4881h 0100100010000001b |             STR     r0, ymin
+200 0C8h | 4086h 0100000010000110b |             LDR     r0, xmax_in
+201 0C9h | 0108h 0000000100001000b |             ADD     r0, 8       ; Add offset since E NP starts 8 cols higher
+202 0CAh | 4882h 0100100010000010b |             STR     r0, xmax
+203 0CBh | 4087h 0100000010000111b |             LDR     r0, ymax_in
+204 0CCh | 4883h 0100100010000011b |             STR     r0, ymax
+205 0CDh | 8240h 1000001001000000b |         WAK
+206 0CEh | 8240h 1000001001000000b |     WAK
+207 0CFh |                         | 
+207 0CFh |                         | CBB_COL_LOOP_CONDITION:
+207 0CFh |                         | 
+207 0CFh | 1701h 0001011100000001b |     SUB     r3, 1               ; Indicate an additional shift is complete
+208 0D0h | C971h 1100100101110001b |     BNZ     CBB_COL_LOOP
+209 0D1h |                         |          
+209 0D1h |                         | ;-------------------------------------------------------------------------------
+209 0D1h |                         | 
+209 0D1h |                         | ; before we embed center_bb and next_x,y into X memory, lets make a copy in Y
+209 0D1h |                         | 
+209 0D1h |                         | COPY_IMAGE:
+209 0D1h |                         | 
+209 0D1h |                         | COPY_IMAGE_INIT:
+209 0D1h |                         | 
+209 0D1h | 4100h 0100000100000000b |     LDR     r0, START_OF_X
+210 0D2h | 4340h 0100001101000000b |     LDR     r1, START_OF_Y
+211 0D3h |                         | 
+211 0D3h |                         | COPY_IMAGE_LOOP:
+211 0D3h |                         | 
+211 0D3h | 44F0h 0100010011110000b |     LDR     r2, [r0]
+212 0D4h | 4CF1h 0100110011110001b |     STR     r2, [r1]
+213 0D5h | 0101h 0000000100000001b |     ADD     r0, 1
+214 0D6h | 0301h 0000001100000001b |     ADD     r1, 1
+215 0D7h | 3940h 0011100101000000b |     CMP     r0, NUM_PIXELS
+216 0D8h | CD33h 1100110100110011b |     BLO     COPY_IMAGE_LOOP
+217 0D9h |                         | 
+217 0D9h |                         | CONVERT_TO_UNSIGNED:
+217 0D9h |                         | 
+217 0D9h |                         | CONVERT_TO_UNSIGNED_INIT:
+217 0D9h |                         | 
+217 0D9h | 4100h 0100000100000000b |     LDR     r0, START_OF_X
+218 0DAh |                         | 
+218 0DAh |                         | CONVERT_TO_UNSIGNED_LOOP:
+218 0DAh |                         | 
+218 0DAh | 42F0h 0100001011110000b |     LDR     r1, [r0]
+219 0DBh | 8A80h 1000101010000000b |     LSL     r1          ; Max value is +255 now
+220 0DCh | 4AF0h 0100101011110000b |     STR     r1, [r0]
+221 0DDh | 0101h 0000000100000001b |     ADD     r0, 1
+222 0DEh | 3940h 0011100101000000b |     CMP     r0, NUM_PIXELS
+223 0DFh | CDA3h 1100110110100011b |     BLO     CONVERT_TO_UNSIGNED_LOOP
+224 0E0h |                         |  
+224 0E0h |                         | ;-------------------------------------------------------------------------------
+224 0E0h |                         | 
+224 0E0h |                         | FIND_BB_CENTER:
+224 0E0h |                         | 
+224 0E0h |                         |     ; At this point, the (0,0) NP has collected and compared all of the 
+224 0E0h |                         |     ; individual NP bounding boxes and found the smallest bounding box that 
+224 0E0h |                         |     ; enclosed all of them.  The tracking algorithm assumes the target is at the
+224 0E0h |                         |     ; center of this bounding box, which encloses all motion in the frame.  The 
+224 0E0h |                         |     ; algorithm finds the center of this box, which roughly corresponds to the 
+224 0E0h |                         |     ; location of the tracked object.  In reality, it lags behind the actual
+224 0E0h |                         |     ; object location since it is actually tracking motion deltas between 
+224 0E0h |                         |     ; frames.
+224 0E0h |                         | 
+224 0E0h | 40F8h 0100000011111000b |     LDR     r0, RCR
+225 0E1h | 3900h 0011100100000000b |     CMP     r0, 00h         ; Check if this is the origin NP
+226 0E2h | 9001h 1001000000000001b |     ZNE                     ; Sleep all other NPs at this point.
+227 0E3h |                         | 
+227 0E3h |                         |         ; Restrict to writing in Z memory (to keep the code from completely 
+227 0E3h |                         |         ; exploding).  Note that this will collide with the storage locations
+227 0E3h |                         |         ; for x/y min/max values, but shouldn't break the code otherwise.
+227 0E3h |                         | 
+227 0E3h |                         |         ;LDR     r1, coord_pointer
+227 0E3h |                         |         ;AND     r1, 00111111b       ; Extract pixel address
+227 0E3h |                         |         ;ADD     r1, START_OF_Z      
+227 0E3h | 4300h 0100001100000000b |         LDR     r1, START_OF_X
+228 0E4h |                         | 
+228 0E4h | 4080h 0100000010000000b |         LDR     r0, xmin    ; Find the center x coordinate
+229 0E5h | 0082h 0000000010000010b |         ADD     r0, xmax
+230 0E6h | 8840h 1000100001000000b |         LSR     r0
+231 0E7h | 48F1h 0100100011110001b |         STR     r0, [r1]    ; Save the result in X memory
+232 0E8h | 0301h 0000001100000001b |         ADD     r1, 1       ; Move to next byte
+233 0E9h | 4081h 0100000010000001b |         LDR     r0, ymin    ; Find the center y coordinate
+234 0EAh | 0083h 0000000010000011b |         ADD     r0, ymax
+235 0EBh | 8840h 1000100001000000b |         LSR     r0
+236 0ECh | 48F1h 0100100011110001b |         STR     r0, [r1]    ; Save the result in X memory
+237 0EDh | 0301h 0000001100000001b |         ADD     r1, 1       ; Move to next byte
+238 0EEh |                         | 
+238 0EEh |                         |         ; now that centers have been saved, we take the difference and store the last
+238 0EEh |                         | 
+238 0EEh | 44C0h 0100010011000000b |         LDR     r2, coord_pointer   ; location to store the trajectory values
+239 0EFh | 253Fh 0010010100111111b |         AND     r2, 00111111b       ; Extract pixel address
+240 0F0h | 0580h 0000010110000000b |         ADD     r2, START_OF_Z      
+241 0F1h | 4300h 0100001100000000b |         LDR     r1, START_OF_X
+242 0F2h |                         | 
+242 0F2h | 40F2h 0100000011110010b |         LDR     r0, [r2]
+243 0F3h | 3900h 0011100100000000b |         CMP     r0, NULL_BB
+244 0F4h | 9001h 1001000000000001b |         ZNE                     ; If NULL, store these as last coordinates seen
+245 0F5h | 40F1h 0100000011110001b |                 LDR    r0, [r1]
+246 0F6h | 48F2h 0100100011110010b |                 STR    r0, [r2] ; store the x_last
+247 0F7h | 0301h 0000001100000001b |                 ADD    r1, 1
+248 0F8h | 0501h 0000010100000001b |                 ADD    r2, 1
+249 0F9h | 40F1h 0100000011110001b |                 LDR    r0, [r1]
+250 0FAh | 48F2h 0100100011110010b |                 STR    r0, [r2] ; store the y_last
+251 0FBh | 1301h 0001001100000001b |                 SUB    r1, 1
+252 0FCh | 1501h 0001010100000001b |                 SUB    r2, 1
+253 0FDh | 8240h 1000001001000000b |         WAK
+254 0FEh |                         | 
+254 0FEh |                         |         ; read the values from Z's coord_pointer and subtract from the current bb center
+254 0FEh |                         |         
+254 0FEh | 40F1h 0100000011110001b |         LDR     r0, [r1]
+255 0FFh | 38F2h 0011100011110010b |         CMP     r0, [r2] ; x vs x_last
+256 100h | 9009h 1001000000001001b |         ZLS     ; x > x_last
+257 101h | 46F1h 0100011011110001b |                 LDR    r3, [r1]
+258 102h | 16F2h 0001011011110010b |                 SUB    r3, [r2]
+259 103h | 00D3h 0000000011010011b |                 ADD    r0, r3   ; xn0 = x + dx
+260 104h | 0302h 0000001100000010b |                 ADD    r1, 2
+261 105h | 48F1h 0100100011110001b |                 STR    r0, [r1]
+262 106h | 00D3h 0000000011010011b |                 ADD    r0, r3   ; xn1 = x + dx
+263 107h | 0302h 0000001100000010b |                 ADD    r1, 2
+264 108h | 48F1h 0100100011110001b |                 STR    r0, [r1]
+265 109h | 00D3h 0000000011010011b |                 ADD    r0, r3   ; xn2 = x + dx
+266 10Ah | 0302h 0000001100000010b |                 ADD    r1, 2
+267 10Bh | 48F1h 0100100011110001b |                 STR    r0, [r1]
+268 10Ch | 1306h 0001001100000110b |                 SUB    r1, 6
+269 10Dh | 8240h 1000001001000000b |         WAK
+270 10Eh |                         |         
+270 10Eh | 40F1h 0100000011110001b |         LDR     r0, [r1]
+271 10Fh | 38F2h 0011100011110010b |         CMP     r0, [r2] ; x vs x_last
+272 110h | 9008h 1001000000001000b |         ZHI     ; x <= x_last
+273 111h | 46F2h 0100011011110010b |                 LDR    r3, [r2]
+274 112h | 16F1h 0001011011110001b |                 SUB    r3, [r1]
+275 113h | 10D3h 0001000011010011b |                 SUB    r0, r3   ; xn0 = x - dx
+276 114h | 0302h 0000001100000010b |                 ADD    r1, 2
+277 115h | 48F1h 0100100011110001b |                 STR    r0, [r1] 
+278 116h | 10D3h 0001000011010011b |                 SUB    r0, r3   ; xn1 = x - dx
+279 117h | 0302h 0000001100000010b |                 ADD    r1, 2
+280 118h | 48F1h 0100100011110001b |                 STR    r0, [r1] 
+281 119h | 10D3h 0001000011010011b |                 SUB    r0, r3   ; xn2 = x - dx
+282 11Ah | 0302h 0000001100000010b |                 ADD    r1, 2
+283 11Bh | 48F1h 0100100011110001b |                 STR    r0, [r1] 
+284 11Ch | 1306h 0001001100000110b |                 SUB    r1, 6
+285 11Dh | 8240h 1000001001000000b |         WAK
+286 11Eh |                         | 
+286 11Eh | 40F1h 0100000011110001b |         LDR     r0, [r1]
+287 11Fh | 48F2h 0100100011110010b |         STR     r0, [r2] ; x_last = x
+288 120h |                         |         
+288 120h | 0301h 0000001100000001b |         ADD     r1, 1
+289 121h | 0501h 0000010100000001b |         ADD     r2, 1
+290 122h |                         | 
+290 122h | 40F1h 0100000011110001b |         LDR     r0, [r1]
+291 123h | 38F2h 0011100011110010b |         CMP     r0, [r2] ; y vs y_last
+292 124h | 9009h 1001000000001001b |         ZLS     ; y > y_last
+293 125h | 46F1h 0100011011110001b |                 LDR    r3, [r1]
+294 126h | 16F2h 0001011011110010b |                 SUB    r3, [r2]
+295 127h | 00D3h 0000000011010011b |                 ADD    r0, r3   ; yn0 = y + dy
+296 128h | 0302h 0000001100000010b |                 ADD    r1, 2
+297 129h | 48F1h 0100100011110001b |                 STR    r0, [r1]
+298 12Ah | 00D3h 0000000011010011b |                 ADD    r0, r3   ; yn1 = y + dy
+299 12Bh | 0302h 0000001100000010b |                 ADD    r1, 2
+300 12Ch | 48F1h 0100100011110001b |                 STR    r0, [r1]
+301 12Dh | 00D3h 0000000011010011b |                 ADD    r0, r3   ; yn2 = y + dy
+302 12Eh | 0302h 0000001100000010b |                 ADD    r1, 2
+303 12Fh | 48F1h 0100100011110001b |                 STR    r0, [r1]
+304 130h | 1306h 0001001100000110b |                 SUB    r1, 6
+305 131h | 8240h 1000001001000000b |         WAK
+306 132h |                         |         
+306 132h | 40F1h 0100000011110001b |         LDR     r0, [r1]
+307 133h | 38F2h 0011100011110010b |         CMP     r0, [r2] ; y vs y_last
+308 134h | 9008h 1001000000001000b |         ZHI     ; y <= y_last
+309 135h | 46F2h 0100011011110010b |                 LDR    r3, [r2]
+310 136h | 16F1h 0001011011110001b |                 SUB    r3, [r1]
+311 137h | 10D3h 0001000011010011b |                 SUB    r0, r3   ; yn0 = y - dy
+312 138h | 0302h 0000001100000010b |                 ADD    r1, 2
+313 139h | 48F1h 0100100011110001b |                 STR    r0, [r1] 
+314 13Ah | 10D3h 0001000011010011b |                 SUB    r0, r3   ; yn1 = y - dy
+315 13Bh | 0302h 0000001100000010b |                 ADD    r1, 2
+316 13Ch | 48F1h 0100100011110001b |                 STR    r0, [r1] 
+317 13Dh | 10D3h 0001000011010011b |                 SUB    r0, r3   ; yn2 = y - dy
+318 13Eh | 0302h 0000001100000010b |                 ADD    r1, 2
+319 13Fh | 48F1h 0100100011110001b |                 STR    r0, [r1] 
+320 140h | 1306h 0001001100000110b |                 SUB    r1, 6
+321 141h | 8240h 1000001001000000b |         WAK
+322 142h |                         |         
+322 142h | 40F1h 0100000011110001b |         LDR     r0, [r1]
+323 143h | 48F2h 0100100011110010b |         STR     r0, [r2] ; y_last = y
+324 144h |                         | 
+324 144h |                         |         ; X memory[(0,0) - (0,3)] now contains:
+324 144h |                         |         ; x_center, y_center, x_next, y_next
+324 144h |                         | 
+324 144h |                         |         ; Z memory[(0,0) - (0,1)] now contains:
+324 144h |                         |         ; x_last, y_last
+324 144h |                         | 
+324 144h | 8240h 1000001001000000b |     WAK
+325 145h |                         | 
+325 145h |                         | ;-------------------------------------------------------------------------------
+325 145h |                         | 
+325 145h |                         | OUTPUT_ORIGINAL_IMAGE:
+325 145h |                         | 
+325 145h | 4100h 0100000100000000b |     LDR     r0, START_OF_X
+326 146h | F480h 1111010010000000b |     BL      OUTPUT_DATA_BLOCK   ; Output the image
+327 147h |                         |      
+327 147h |                         | ;-------------------------------------------------------------------------------
+327 147h |                         |  
+327 147h |                         | ;-------------------------------------------------------------------------------
+327 147h |                         | 
+327 147h |                         | DEBUG:
+327 147h |                         |           
+327 147h |                         | ;-------------------------------------------------------------------------------
+327 147h |                         | 
+327 147h |                         |     ;LDR     r0, START_OF_Y
+327 147h |                         |     ;BL      OUTPUT_DATA_BLOCK
+327 147h |                         |              
+327 147h |                         |     ;LDR     r0, START_OF_Z
+327 147h |                         |     ;BL      OUTPUT_DATA_BLOCK
+327 147h |                         | 
+327 147h |                         | ;-------------------------------------------------------------------------------
+327 147h |                         | 
+327 147h | C08Fh 1100000010001111b |     B       START
+328 148h |                         | 
+328 148h |                         | 
+328 148h |                         | 
+328 148h |                         | ;-------------------------------------------------------------------------------
+328 148h |                         | ; OUTPUT_DATA_BLOCK
+328 148h |                         | ;
+328 148h |                         | ; Description:
+328 148h |                         | ;
+328 148h |                         | ;   The output function, which dumps 64 bytes of data out through the column
+328 148h |                         | ;   data bus.  This can be called with different starting addresses to determine
+328 148h |                         | ;   whether X, Y, Z or some other block is output.
+328 148h |                         | ;
+328 148h |                         | ; Inputs:
+328 148h |                         | ;
+328 148h |                         | ;   r0          The address to begin outputing.  The last byte will be output
+328 148h |                         | ;               from address r0+63.
+328 148h |                         | ;
+328 148h |                         | ; Outputs:
+328 148h |                         | ;
+328 148h |                         | ;   -           64 bytes for each NP on column data bus.
+328 148h |                         | ;
+328 148h |                         | ; Registers Modified:
+328 148h |                         | ;
+328 148h |                         | ;   r0, r1
+328 148h |                         | ;-------------------------------------------------------------------------------
+328 148h |                         | 
+328 148h |                         | OUTPUT_DATA_BLOCK:
+328 148h |                         | 
+328 148h | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address.
+329 149h | 0340h 0000001101000000b |     ADD     r1, NUM_PIXELS      
+330 14Ah |                         | 
+330 14Ah |                         | OUTPUT_DATA_BLOCK_LOOP:
+330 14Ah |                         | 
+330 14Ah | A0F0h 1010000011110000b |     OUT     [r0], 0          ; Row 0
+331 14Bh | A2F0h 1010001011110000b |     OUT     [r0], 1          ; Row 1
+332 14Ch | A4F0h 1010010011110000b |     OUT     [r0], 2          ; Row 2
+333 14Dh | A6F0h 1010011011110000b |     OUT     [r0], 3          ; Row 3
+334 14Eh | A8F0h 1010100011110000b |     OUT     [r0], 4          ; Row 4
+335 14Fh | AAF0h 1010101011110000b |     OUT     [r0], 5          ; Row 5
+336 150h | ACF0h 1010110011110000b |     OUT     [r0], 6          ; Row 6
+337 151h | AEF0h 1010111011110000b |     OUT     [r0], 7          ; Row 7
+338 152h |                         |     
+338 152h | 0101h 0000000100000001b |     ADD     r0, 1
+339 153h | 38D1h 0011100011010001b |     CMP     r0, r1
+340 154h | D4A1h 1101010010100001b |     BNE     OUTPUT_DATA_BLOCK_LOOP
+341 155h | 8210h 1000001000010000b |     BX 

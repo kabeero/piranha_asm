@@ -1,0 +1,299 @@
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | ; edge_detection.asm
+  0 000h |                         | ;                           N
+  0 000h |                         | ; Reference directions:   W C E
+  0 000h |                         | ;                           S
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | 
+  0 000h |                         | ; Define new instruction labels to make the code intuitive to read.
+  0 000h |                         | 
+  0 000h |                         | #define ROW_MASK            00111000b   ; The row bits.
+  0 000h |                         | #define COL_MASK            00000111b   ; The column bits.
+  0 000h |                         | 
+  0 000h |                         | #define START_OF_X          00000000b   ; Starting address of X RAM.
+  0 000h |                         | #define START_OF_Y          01000000b   ; Starting address of Y RAM.
+  0 000h |                         | #define START_OF_Z          10000000b   ; Starting address of X RAM.
+  0 000h |                         | #define START_OF_V          11000000b   ; Starting address of V RAM.
+  0 000h |                         |  
+  0 000h |                         | #define TRUE                 1          ; True pattern
+  0 000h |                         | #define FALSE                0          ; False pattern
+  0 000h |                         | #define NULL                -1          ; Null pattern
+  0 000h |                         | 
+  0 000h |                         | #define NUM_PIXELS          64          ; The number of pixels in the NP.
+  0 000h |                         | 
+  0 000h |                         | #define EDGE_THRESHOLD      48          ; Treshold where edge is detected.
+  0 000h |                         | #define MASK_AF             01000000b   ; ADC active flag
+  0 000h |                         | 
+  0 000h |                         | #define addr                r0          ; The current pixel address
+  0 000h |                         | #define pxl_nw                r1          ; The west pixel
+  0 000h |                         | #define pxl_c                r2          ; The center pixel
+  0 000h |                         | #define tmp                 r3          ; Temp storage (usage varies)
+  0 000h |                         | 
+  0 000h |                         | START:
+  0 000h |                         | 
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | ; Initialize memory
+  0 000h |                         | ;-------------------------------------------------------------------------------
+  0 000h |                         | 
+  0 000h |                         | INITIALIZE_IMAGE_AND_EDGE_MAP:
+  0 000h |                         | 
+  0 000h | 4100h 0100000100000000b |     LDR     r0, START_OF_X  ; Erase X where the image will be stored.
+  1 001h | 4780h 0100011110000000b |     LDR     r3, START_OF_Z  ; Erase Z where the edge map will be stored.
+  2 002h | 42D0h 0100001011010000b |     LDR     r1, r0          ; The end address
+  3 003h | 0340h 0000001101000000b |     ADD     r1, NUM_PIXELS
+  4 004h | 4500h 0100010100000000b |     LDR     r2, 0           ; The initialization value
+  5 005h |                         | 
+  5 005h |                         | INITIALIZE_IMAGE_AND_EDGE_MAP_LOOP:
+  5 005h |                         | 
+  5 005h | 4CF0h 0100110011110000b |     STR     r2, [r0]        ; Set the value
+  6 006h | 4CF3h 0100110011110011b |     STR     r2, [r3]        ; Set the value
+  7 007h | 0101h 0000000100000001b |     ADD     r0, 1
+  8 008h | 0701h 0000011100000001b |     ADD     r3, 1
+  9 009h | 38D1h 0011100011010001b |     CMP     r0, r1          ; Check if this is the last pixel
+ 10 00Ah | C051h 1100000001010001b |     BNE     INITIALIZE_IMAGE_AND_EDGE_MAP_LOOP
+ 11 00Bh |                         | 
+ 11 00Bh |                         | ;-------------------------------------------------------------------------------
+ 11 00Bh |                         | ; Take the image
+ 11 00Bh |                         | ;-------------------------------------------------------------------------------
+ 11 00Bh |                         | 
+ 11 00Bh |                         | ACQUIRE_IMAGE:
+ 11 00Bh |                         | 
+ 11 00Bh | 8220h 1000001000100000b |     IMG
+ 12 00Ch |                         | 
+ 12 00Ch |                         | WAIT_FOR_ADC:
+ 12 00Ch |                         | 
+ 12 00Ch | 40F4h 0100000011110100b |     LDR     r0, SR      ; Check if the ADC conversion is complete
+ 13 00Dh | 2140h 0010000101000000b |     AND     r0, MASK_AF
+ 14 00Eh | C0C1h 1100000011000001b |     BNZ     WAIT_FOR_ADC
+ 15 00Fh |                         | 
+ 15 00Fh |                         | CONVERT_TO_BINARY:
+ 15 00Fh |                         |     
+ 15 00Fh | 4100h 0100000100000000b |     LDR     r0, START_OF_X  ; Start of image
+ 16 010h | 42D0h 0100001011010000b |     LDR     r1, r0
+ 17 011h | 0340h 0000001101000000b |     ADD     r1, NUM_PIXELS  ; End of image
+ 18 012h |                         | 
+ 18 012h |                         | CONVERT_TO_BINARY_LOOP:
+ 18 012h |                         | 
+ 18 012h | 44F0h 0100010011110000b |     LDR     r2, [r0]    ; Convert gray to binary code
+ 19 013h | 8C20h 1000110000100000b |     GTB     r2
+ 20 014h | 4CF0h 0100110011110000b |     STR     r2, [r0]
+ 21 015h | 0101h 0000000100000001b |     ADD     r0, 1
+ 22 016h | 38D1h 0011100011010001b |     CMP     r0, r1
+ 23 017h | C121h 1100000100100001b |     BNE     CONVERT_TO_BINARY_LOOP
+ 24 018h |                         |  
+ 24 018h | 4100h 0100000100000000b |     LDR     r0, START_OF_X
+ 25 019h | C1AFh 1100000110101111b |     B       VERTICAL_EDGE_DETECT
+ 26 01Ah |                         | 
+ 26 01Ah |                         | ;-------------------------------------------------------------------------------
+ 26 01Ah |                         | ; Detect vertical edges
+ 26 01Ah |                         | ;-------------------------------------------------------------------------------
+ 26 01Ah |                         | 
+ 26 01Ah |                         | VERTICAL_EDGE_DETECT:
+ 26 01Ah |                         | 
+ 26 01Ah | 4100h 0100000100000000b |     LDR     addr, START_OF_X
+ 27 01Bh |                         | 
+ 27 01Bh |                         | VERTICAL_EDGE_DETECT_LOOP:
+ 27 01Bh |                         | 
+ 27 01Bh | 46D0h 0100011011010000b |     LDR     tmp, addr
+ 28 01Ch | 2707h 0010011100000111b |     AND     tmp, COL_MASK
+ 29 01Dh | C1F0h 1100000111110000b |     BZ      VERTICAL_PIXEL_ON_W_EDGE
+ 30 01Eh | C25Fh 1100001001011111b |     B       VERTICAL_PIXEL_IN_INTERIOR
+ 31 01Fh |                         | 
+ 31 01Fh |                         | VERTICAL_PIXEL_ON_W_EDGE:
+ 31 01Fh |                         | 
+ 31 01Fh | 0107h 0000000100000111b |     ADD     addr, 7                     ; Jump to E pixel in this row and send to E NP
+ 32 020h | 42F0h 0100001011110000b |     LDR     pxl_nw, [addr]
+ 33 021h | 42E4h 0100001011100100b |     LDR     pxl_nw, W
+ 34 022h | 1107h 0001000100000111b |     SUB     addr, 7                     ; Return to current pixel
+ 35 023h | 44F0h 0100010011110000b |     LDR     pxl_c, [addr]
+ 36 024h | C27Fh 1100001001111111b |     B       VERTICAL_CHECK_IF_RISING_EDGE
+ 37 025h |                         |  
+ 37 025h |                         | VERTICAL_PIXEL_IN_INTERIOR:
+ 37 025h |                         | 
+ 37 025h | 44F0h 0100010011110000b |     LDR     pxl_c, [addr]               ; Assume pxl_nw loaded from last iteration
+ 38 026h | C27Fh 1100001001111111b |     B       VERTICAL_CHECK_IF_RISING_EDGE
+ 39 027h |                         |                         
+ 39 027h |                         | VERTICAL_CHECK_IF_RISING_EDGE:
+ 39 027h |                         | 
+ 39 027h | 3CD1h 0011110011010001b |     CMP     pxl_c, pxl_nw               ; Check if value increases from W to C
+ 40 028h | 9003h 1001000000000011b |     ZLO         
+ 41 029h | 46D2h 0100011011010010b |         LDR     tmp, pxl_c
+ 42 02Ah | 16D1h 0001011011010001b |         SUB     tmp, pxl_nw             ; delta = C - W
+ 43 02Bh | 3F30h 0011111100110000b |         CMP     tmp, EDGE_THRESHOLD
+ 44 02Ch | 9003h 1001000000000011b |         ZLO
+ 45 02Dh | 0180h 0000000110000000b |             ADD     addr, START_OF_Z    ; Set corresponding Z RAM pixel white.
+ 46 02Eh | 47FFh 0100011111111111b |             LDR     tmp, FFh
+ 47 02Fh | 4EF0h 0100111011110000b |             STR     tmp, [addr]
+ 48 030h | 1180h 0001000110000000b |             SUB     addr, START_OF_Z    ; Return to the current pixel.
+ 49 031h | 8240h 1000001001000000b |         WAK
+ 50 032h | 8240h 1000001001000000b |     WAK
+ 51 033h |                         |  
+ 51 033h |                         | VERTICAL_MUST_BE_A_FALLING_EDGE:
+ 51 033h |                         | 
+ 51 033h | 3CD1h 0011110011010001b |     CMP     pxl_c, pxl_nw               ; Check if value decreases from W to C
+ 52 034h | 9002h 1001000000000010b |     ZHS         
+ 53 035h | 46D1h 0100011011010001b |         LDR     tmp, pxl_nw
+ 54 036h | 16D2h 0001011011010010b |         SUB     tmp, pxl_c              ; delta = W - C
+ 55 037h | 3F30h 0011111100110000b |         CMP     tmp, EDGE_THRESHOLD
+ 56 038h | 9003h 1001000000000011b |         ZLO
+ 57 039h | 0180h 0000000110000000b |             ADD     addr, START_OF_Z    ; Set corresponding Z RAM pixel white.
+ 58 03Ah | 47FFh 0100011111111111b |             LDR     tmp, FFh
+ 59 03Bh | 4EF0h 0100111011110000b |             STR     tmp, [addr]
+ 60 03Ch | 1180h 0001000110000000b |             SUB     addr, START_OF_Z    ; Return to the current pixel.
+ 61 03Dh | 8240h 1000001001000000b |         WAK
+ 62 03Eh | 8240h 1000001001000000b |     WAK
+ 63 03Fh |                         |  
+ 63 03Fh |                         | VERTICAL_EDGE_DETECT_LOOP_END:
+ 63 03Fh |                         | 
+ 63 03Fh | 42D2h 0100001011010010b |     LDR     pxl_nw, pxl_c               ; Move data for use in next cycle
+ 64 040h | 0101h 0000000100000001b |     ADD     addr, 1                     ; Move to next pixel
+ 65 041h | 3940h 0011100101000000b |     CMP     addr, NUM_PIXELS
+ 66 042h | C1B3h 1100000110110011b |     BLO     VERTICAL_EDGE_DETECT_LOOP
+ 67 043h |                         | 
+ 67 043h |                         | ;-------------------------------------------------------------------------------
+ 67 043h |                         | ; Detect horizontal edges 
+ 67 043h |                         | ;-------------------------------------------------------------------------------
+ 67 043h |                         |      
+ 67 043h |                         | HORIZONTAL_EDGE_DETECT:
+ 67 043h |                         | 
+ 67 043h | 4100h 0100000100000000b |     LDR     addr, START_OF_X
+ 68 044h |                         | 
+ 68 044h |                         | HORIZONTAL_EDGE_DETECT_LOOP:
+ 68 044h |                         | 
+ 68 044h | 46D0h 0100011011010000b |     LDR     tmp, addr
+ 69 045h | 2738h 0010011100111000b |     AND     tmp, ROW_MASK
+ 70 046h | C480h 1100010010000000b |     BZ      HORIZONTAL_PIXEL_ON_N_EDGE
+ 71 047h | C4EFh 1100010011101111b |     B       HORIZONTAL_PIXEL_IN_INTERIOR
+ 72 048h |                         | 
+ 72 048h |                         | HORIZONTAL_PIXEL_ON_N_EDGE:
+ 72 048h |                         | 
+ 72 048h | 0138h 0000000100111000b |     ADD     addr, 56                    ; Jump to S pixel in this col and send to S NP
+ 73 049h | 42F0h 0100001011110000b |     LDR     pxl_nw, [addr]
+ 74 04Ah | 42E1h 0100001011100001b |     LDR     pxl_nw, N
+ 75 04Bh | 1138h 0001000100111000b |     SUB     addr, 56                    ; Return to current pixel
+ 76 04Ch | 44F0h 0100010011110000b |     LDR     pxl_c, [addr]
+ 77 04Dh | C53Fh 1100010100111111b |     B       HORIZONTAL_CHECK_IF_RISING_EDGE
+ 78 04Eh |                         |  
+ 78 04Eh |                         | HORIZONTAL_PIXEL_IN_INTERIOR:
+ 78 04Eh |                         | 
+ 78 04Eh | 44F0h 0100010011110000b |     LDR     pxl_c, [addr]               
+ 79 04Fh | 1108h 0001000100001000b |     SUB     addr, 8                     ; Move up a row and load the N pixel
+ 80 050h | 42F0h 0100001011110000b |     LDR     pxl_nw, [addr]
+ 81 051h | 0108h 0000000100001000b |     ADD     addr, 8
+ 82 052h | C53Fh 1100010100111111b |     B       HORIZONTAL_CHECK_IF_RISING_EDGE
+ 83 053h |                         |                         
+ 83 053h |                         | HORIZONTAL_CHECK_IF_RISING_EDGE:
+ 83 053h |                         | 
+ 83 053h | 3CD1h 0011110011010001b |     CMP     pxl_c, pxl_nw               ; Check if value increases from N to C
+ 84 054h | 9003h 1001000000000011b |     ZLO         
+ 85 055h | 46D2h 0100011011010010b |         LDR     tmp, pxl_c
+ 86 056h | 16D1h 0001011011010001b |         SUB     tmp, pxl_nw             ; delta = C - N
+ 87 057h | 3F30h 0011111100110000b |         CMP     tmp, EDGE_THRESHOLD
+ 88 058h | 9003h 1001000000000011b |         ZLO
+ 89 059h | 0180h 0000000110000000b |             ADD     addr, START_OF_Z    ; Set corresponding Z RAM pixel white.
+ 90 05Ah | 47FFh 0100011111111111b |             LDR     tmp, FFh
+ 91 05Bh | 4EF0h 0100111011110000b |             STR     tmp, [addr]
+ 92 05Ch | 1180h 0001000110000000b |             SUB     addr, START_OF_Z    ; Return to the current pixel.
+ 93 05Dh | 8240h 1000001001000000b |         WAK
+ 94 05Eh | 8240h 1000001001000000b |     WAK
+ 95 05Fh |                         |  
+ 95 05Fh |                         | HORIZONTAL_MUST_BE_A_FALLING_EDGE:
+ 95 05Fh |                         | 
+ 95 05Fh | 3CD1h 0011110011010001b |     CMP     pxl_c, pxl_nw                ; Check if value decreases from N to C
+ 96 060h | 9002h 1001000000000010b |     ZHS         
+ 97 061h | 46D1h 0100011011010001b |         LDR     tmp, pxl_nw
+ 98 062h | 16D2h 0001011011010010b |         SUB     tmp, pxl_c              ; delta = C - N
+ 99 063h | 3F30h 0011111100110000b |         CMP     tmp, EDGE_THRESHOLD
+100 064h | 9003h 1001000000000011b |         ZLO
+101 065h | 0180h 0000000110000000b |             ADD     addr, START_OF_Z    ; Set corresponding Z RAM pixel white.
+102 066h | 47FFh 0100011111111111b |             LDR     tmp, FFh
+103 067h | 4EF0h 0100111011110000b |             STR     tmp, [addr]
+104 068h | 1180h 0001000110000000b |             SUB     addr, START_OF_Z    ; Return to the current pixel.
+105 069h | 8240h 1000001001000000b |         WAK
+106 06Ah | 8240h 1000001001000000b |     WAK
+107 06Bh |                         |  
+107 06Bh |                         | HORIZONTAL_EDGE_DETECT_LOOP_END:
+107 06Bh |                         | 
+107 06Bh | 42D2h 0100001011010010b |     LDR     pxl_nw, pxl_c                ; Move data for use in next cycle
+108 06Ch | 0101h 0000000100000001b |     ADD     addr, 1                     ; Move to next pixel
+109 06Dh | 3940h 0011100101000000b |     CMP     addr, NUM_PIXELS
+110 06Eh | C443h 1100010001000011b |     BLO     HORIZONTAL_EDGE_DETECT_LOOP
+111 06Fh |                         | 
+111 06Fh |                         | ;PERIMETER_ZERO_INIT:
+111 06Fh |                         | ;	LDR		r1, 0
+111 06Fh |                         | ;	
+111 06Fh |                         | ;PERIMETER_ZERO:
+111 06Fh |                         | ;
+111 06Fh |                         | ;	LDR 	r0, rcr
+111 06Fh |                         | ;	CMP		r0, r1
+111 06Fh |                         | ;	ZNE
+111 06Fh |                         | ;		PERIMETER_ZERO_MEMORY_INIT:
+111 06Fh |                         | ;		
+111 06Fh |                         | ;			LDR		r2, START_OF_Z
+111 06Fh |                         | ;		
+111 06Fh |                         | ;		PERIMETER_ZERO_MEMORY:
+111 06Fh |                         | ;		
+111 06Fh |                         | ;			LDR		r0, 0
+111 06Fh |                         | ;			STR		r0, [r2]
+111 06Fh |                         | ;			ADD		r2, 8
+111 06Fh |                         | ;			CMP		r2, NUM_PIXELS
+111 06Fh |                         | ;			BLO		PERIMETER_ZERO_MEMORY
+111 06Fh |                         | ;	WAK
+111 06Fh |                         | ;	ADD		r1, 10h
+111 06Fh |                         | ;	CMP		r1, 80h
+111 06Fh |                         | ;	BLO		PERIMETER_ZERO
+111 06Fh |                         | 
+111 06Fh |                         | OUTPUT_EDGE_MAP:
+111 06Fh |                         | 
+111 06Fh | 4180h 0100000110000000b |     LDR     addr, START_OF_Z            ; Output the edge map in Z
+112 070h | E730h 1110011100110000b |     BL      Output_Data_Block
+113 071h | C00Fh 1100000000001111b |     B       START                       ; Infinite loop
+114 072h |                         | 
+114 072h |                         | END:
+114 072h |                         | 
+114 072h | C72Fh 1100011100101111b |     B       END
+115 073h |                         | 
+115 073h |                         | 
+115 073h |                         | ;-------------------------------------------------------------------------------
+115 073h |                         | ; Output_Data_Block
+115 073h |                         | ;
+115 073h |                         | ; Description:
+115 073h |                         | ;
+115 073h |                         | ;   The output function, which dumps 64 bytes of data out through the column
+115 073h |                         | ;   data bus.  This can be called with different starting addresses to determine
+115 073h |                         | ;   whether X, Y, Z or some other block is output.
+115 073h |                         | ;
+115 073h |                         | ; Inputs:
+115 073h |                         | ;
+115 073h |                         | ;   r0          The address to begin outputing.  The last byte will be output
+115 073h |                         | ;               from address r0+63.
+115 073h |                         | ;
+115 073h |                         | ; Outputs:
+115 073h |                         | ;
+115 073h |                         | ;   -           64 bytes for each NP on column data bus.
+115 073h |                         | ;
+115 073h |                         | ; Registers Modified:
+115 073h |                         | ;
+115 073h |                         | ;   r0, r1
+115 073h |                         | ;-------------------------------------------------------------------------------
+115 073h |                         | 
+115 073h |                         | Output_Data_Block:
+115 073h |                         | 
+115 073h | 42D0h 0100001011010000b |     LDR     r1, r0          ; Calculate the final address.
+116 074h | 0340h 0000001101000000b |     ADD     r1, 64      
+117 075h |                         | 
+117 075h |                         | OUTPUT_DATA_BLOCK_LOOP:
+117 075h |                         | 
+117 075h | A0F0h 1010000011110000b |     OUT     [r0], 0          ; Row 0
+118 076h | A2F0h 1010001011110000b |     OUT     [r0], 1          ; Row 1
+119 077h | A4F0h 1010010011110000b |     OUT     [r0], 2          ; Row 2
+120 078h | A6F0h 1010011011110000b |     OUT     [r0], 3          ; Row 3
+121 079h | A8F0h 1010100011110000b |     OUT     [r0], 4          ; Row 4
+122 07Ah | AAF0h 1010101011110000b |     OUT     [r0], 5          ; Row 5
+123 07Bh | ACF0h 1010110011110000b |     OUT     [r0], 6          ; Row 6
+124 07Ch | AEF0h 1010111011110000b |     OUT     [r0], 7          ; Row 7
+125 07Dh |                         |     
+125 07Dh | 0101h 0000000100000001b |     ADD     r0, 1
+126 07Eh | 38D1h 0011100011010001b |     CMP     r0, r1
+127 07Fh | C751h 1100011101010001b |     BNE     OUTPUT_DATA_BLOCK_LOOP
+128 080h | 8210h 1000001000010000b |     BX 

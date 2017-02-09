@@ -1,0 +1,331 @@
+; Custom naming for some instructions to make code more readable.
+
+; Program constants.
+
+#define     NUM_PXL     64
+#define     NUM_ROWS    8
+#define     NUM_COLS    8
+
+#define     MAX_DELTA   8
+
+#define     ROW_LEN     NUM_COLS
+#define     COL_LEN     NUM_ROWS
+
+#define     COL_MASK    00000111b
+#define     ROW_MASK    00111000b
+   
+; Architecture constants
+
+#define START_OF_X          00000000b   ; Starting address of X RAM.
+#define START_OF_Y          01000000b   ; Starting address of Y RAM.
+#define START_OF_Z          10000000b   ; Starting address of X RAM.
+#define START_OF_V          11000000b   ; Starting address of V RAM.
+#define NUM_PIXELS          64          ; The number of pixels in one NP.
+
+; Program variables and their register assignment.
+
+#define     index       r1
+#define     image       x
+
+#define     row         v0
+#define     col         v1
+#define     delta       v2
+
+#define     data_nw     v4
+#define     data_ne     v5
+#define     data_sw     v6
+#define     data_se     v7
+ 
+#define     addr        r0          ; The address to write to.
+#define     final_addr  r1          ; The last address to write to.
+ 
+;-------------------------------------------------------------------------------
+; 
+; Focal Plane Prediction Algorithm.  Three levels.
+;
+;-------------------------------------------------------------------------------
+         
+START:
+
+;-------------------------------------------------------------------------------
+;
+; Unsigned to signed conversion.  Converts unsigned 8 bit grayscale to 8 bit
+; signed values.  This reduces the output resolution by 1 bit.
+;
+;-------------------------------------------------------------------------------
+
+    LDR     r1, 0
+
+CONVERT_TO_SGN:
+
+    LDR     r0, [r1]
+    LSR     r0                      ; Divide all values by 2.
+    STR     r0, [r1]
+    ADD     r1, 1
+    CMP     r1, NUM_PXL
+    BNE     CONVERT_TO_SGN          ; Detects end of pixel array.
+
+; Perform FPP on 8x8 pixel array of the NP.
+
+    BL      FPP
+  
+OUTPUT_DATA_BLOCK_INIT:
+
+    LDR     addr, START_OF_X        ; Output the X RAM.
+    LDR     final_addr, addr        ; Calculate the final address.
+    ADD     final_addr, NUM_PIXELS
+                
+OUTPUT_DATA_BLOCK_LOOP:
+
+    OUT     [addr], 0               ; Row 0
+    OUT     [addr], 1               ; Row 1
+    OUT     [addr], 2               ; Row 2
+    OUT     [addr], 3               ; Row 3
+    OUT     [addr], 4               ; Row 4
+    OUT     [addr], 5               ; Row 5
+    OUT     [addr], 6               ; Row 6
+    OUT     [addr], 7               ; Row 7
+    
+    ADD     addr, 1                 ; Check if done outputting the RAM.
+    CMP     addr, final_addr
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+     
+END:
+    
+    RST
+
+;-------------------------------------------------------------------------------
+; Block_FPP
+;
+; Input:
+;
+;   ptr         Address of NW element of block.
+;   delta       The row or column distance between the center and the NW pixel.
+;   
+; Variables:
+;   
+;   row
+;   col
+;   data_nw
+;   data_ne
+;   data_sw
+;   data_se
+;-------------------------------------------------------------------------------
+
+FPP:
+
+FPP_INIT:
+
+    LDR     r3, 0           ; Initialize to start at [0,0]
+    STR     r3, row
+    STR     r3, col
+    LDR     r0, 1           ; Initialize the delta to start at 1
+    STR     r0, delta
+
+FPP_LOOP:
+
+    LDR     r3, row         ; Load the current row/col as an address
+    LSL     r3
+    LSL     r3
+    LSL     r3
+    ORR     r3, col 
+    LDR     r0, [r3]        ; Save the NW pxl
+    STR     r0, data_nw
+
+FPP_CASE_SELECTION:
+
+    LDR     r1, delta       ; Calculate 2*delta to check if req'd pxls are in NP
+    LSL     r1
+    LDR     r2, r1
+    ADD     r1, row
+    ADD     r2, col
+
+    CMP     r1, NUM_ROWS
+    BHS     FPP_SOUTH_TRUE     
+    B       FPP_SOUTH_FALSE
+
+    FPP_SOUTH_TRUE:
+        CMP     r2, NUM_COLS
+        BHS     FPP_SOUTHEAST_EDGE_PXL
+        B       FPP_SOUTH_EDGE_PXL
+
+    FPP_SOUTH_FALSE:
+        CMP     r2, NUM_COLS
+        BHS     FPP_EAST_EDGE_PXL
+        B       FPP_INTERIOR_PXL
+
+FPP_SOUTHEAST_EDGE_PXL:
+                                      
+    LDR     r0, r3          ; Prepare the NE pxl for NP to the W
+    AND     r0, ROW_MASK
+    LDR     r0, [r0]
+    LDR     r0, E
+    STR     r0, data_ne
+                                
+    LDR     r0, r3          ; Prepare the SW pxl for NP to the N
+    AND     r0, COL_MASK
+    LDR     r0, [r0]
+    LDR     r0, S
+    STR     r0, data_sw
+    
+    LDR     r0, x[0,0]      ; Prepare the SE pxl for the NP to the NW
+    LDR     r0, S
+    LDR     r0, E
+    STR     r0, data_se
+ 
+    BL      FPP_BLOCK
+
+    LDR     r0, 0           ; update row/col
+    STR     r0, row
+    STR     r0, col
+                     
+    B       FPP_UPDATE_DELTA
+
+FPP_EAST_EDGE_PXL:
+                                    
+    LDR     r0, r3          ; Prepare the NE pxl for NP to the W
+    AND     r0, ROW_MASK
+    LDR     r0, [r0]
+    LDR     r0, E
+    STR     r0, data_ne
+                    
+    LDR     r1, delta       ; Calc offset to SW pxl from NW pxl
+    LSL     r1       
+    LSL     r1       
+    LSL     r1       
+    LSL     r1       
+    ADD     r1, r3          ; 8*2*delta, or 2*delta rows down.
+    LDR     r0, [r1]
+    STR     r0, data_sw
+                       
+    AND     r1, ROW_MASK    ; Prepare the SE pxl for NP to the W
+    LDR     r0, [r1]
+    LDR     r0, E
+    STR     r0, data_se
+                                    
+    BL      FPP_BLOCK
+
+    LDR     r0, row         ; update row/col
+    ADD     r0, delta
+    ADD     r0, delta
+    STR     r0, row
+    LDR     r0, 0
+    STR     r0, col
+                    
+    B       FPP_LOOP
+                      
+FPP_SOUTH_EDGE_PXL:
+                                   
+    LDR     r0, r3          ; Prepare the SW pxl for NP to the N
+    AND     r0, COL_MASK
+    LDR     r0, [r0]
+    LDR     r0, S
+    STR     r0, data_sw
+                    
+    LDR     r0, r3          ; Move to the NE pxl
+    ADD     r0, delta
+    ADD     r0, delta       ; 2*delta, or 2*delta cols right.
+    LDR     r1, [r0]
+    STR     r1, data_ne
+                       
+    AND     r0, COL_MASK    ; Prepare the SE pxl for NP to the W
+    LDR     r0, [r0]
+    LDR     r0, S
+    STR     r0, data_se
+                                     
+    BL      FPP_BLOCK
+
+    LDR     r0, col         ; update row/col
+    ADD     r0, delta
+    ADD     r0, delta
+    STR     r0, col
+ 
+    B       FPP_LOOP
+
+FPP_INTERIOR_PXL:
+
+    LDR     r0, r3          ; Move to the NE pxl
+    ADD     r0, delta
+    ADD     r0, delta       ; 2*delta, or 2*delta cols right.
+    LDR     r1, [r0]
+    STR     r1, data_ne
+                       
+    LDR     r1, delta       ; Calc offset to SW pxl from NW pxl
+    LSL     r1       
+    LSL     r1       
+    LSL     r1       
+    LSL     r1       
+    LDR     r0, r3
+    ADD     r0, r1          ; 8*2*delta, or 2*delta rows down.
+    LDR     r1, [r0]
+    STR     r1, data_sw
+
+    ADD     r0, delta
+    ADD     r0, delta       ; 2*delta, or 2*delta cols right.
+    LDR     r1, [r0]
+    STR     r1, data_se
+                                       
+    BL      FPP_BLOCK
+
+    LDR     r0, col         ; update row/col
+    ADD     r0, delta
+    ADD     r0, delta
+    STR     r0, col
+                    
+    B       FPP_LOOP
+
+FPP_UPDATE_DELTA:
+
+    LDR     r0, delta       ; Double delta according to FPP alg.
+    LSL     r0
+    STR     r0, delta
+
+    CMP     r0, MAX_DELTA   ; Check if the algorithm is finished.
+    BHI     FPP_END
+    B       FPP_LOOP
+
+FPP_END:
+
+    BX
+ 
+;-------------------------------------------------------------------------------
+; FPP_Block
+;-------------------------------------------------------------------------------
+FPP_Block:
+
+    ; HL band
+    LDR     r0, delta       ; delta cols right
+    ADD     r0, r3          ; The HL band pxl
+    LDR     r1, data_nw
+    ADD     r1, data_ne
+    LSR     r1
+    SUB     r1, [r0]
+    STR     r1, [r0]
+    
+    ; LH band
+    LDR     r0, delta
+    LSL     r0
+    LSL     r0
+    LSL     r0              ; 8*delta = delta rows down
+    ADD     r0, r3          ; The LH band pxl
+    LDR     r1, data_nw
+    ADD     r1, data_sw
+    LSR     r1
+    SUB     r1, [r0]
+    STR     r1, [r0]
+
+    ; LL band
+    ADD     r0, delta       ; The LL band pxl
+    LDR     r1, data_nw
+    ADD     r1, data_se
+    LSR     r1
+    LDR     r2, data_ne
+    ADD     r2, data_sw
+    LSR     r2
+    ADD     r1, r2
+    LSR     r1
+    SUB     r1, [r0]
+    STR     r1, [r0]
+    
+    BX
+          

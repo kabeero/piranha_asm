@@ -1,0 +1,299 @@
+;-------------------------------------------------------------------------------
+; edge_detection.asm
+;                           N
+; Reference directions:   W C E
+;                           S
+;-------------------------------------------------------------------------------
+
+; Define new instruction labels to make the code intuitive to read.
+
+#define ROW_MASK            00111000b   ; The row bits.
+#define COL_MASK            00000111b   ; The column bits.
+
+#define START_OF_X          00000000b   ; Starting address of X RAM.
+#define START_OF_Y          01000000b   ; Starting address of Y RAM.
+#define START_OF_Z          10000000b   ; Starting address of X RAM.
+#define START_OF_V          11000000b   ; Starting address of V RAM.
+ 
+#define TRUE                 1          ; True pattern
+#define FALSE                0          ; False pattern
+#define NULL                -1          ; Null pattern
+
+#define NUM_PIXELS          64          ; The number of pixels in the NP.
+
+#define EDGE_THRESHOLD      48          ; Treshold where edge is detected.
+#define MASK_AF             01000000b   ; ADC active flag
+
+#define addr                r0          ; The current pixel address
+#define pxl_nw                r1          ; The west pixel
+#define pxl_c                r2          ; The center pixel
+#define tmp                 r3          ; Temp storage (usage varies)
+
+START:
+
+;-------------------------------------------------------------------------------
+; Initialize memory
+;-------------------------------------------------------------------------------
+
+INITIALIZE_IMAGE_AND_EDGE_MAP:
+
+    LDR     r0, START_OF_X  ; Erase X where the image will be stored.
+    LDR     r3, START_OF_Z  ; Erase Z where the edge map will be stored.
+    LDR     r1, r0          ; The end address
+    ADD     r1, NUM_PIXELS
+    LDR     r2, 0           ; The initialization value
+
+INITIALIZE_IMAGE_AND_EDGE_MAP_LOOP:
+
+    STR     r2, [r0]        ; Set the value
+    STR     r2, [r3]        ; Set the value
+    ADD     r0, 1
+    ADD     r3, 1
+    CMP     r0, r1          ; Check if this is the last pixel
+    BNE     INITIALIZE_IMAGE_AND_EDGE_MAP_LOOP
+
+;-------------------------------------------------------------------------------
+; Take the image
+;-------------------------------------------------------------------------------
+
+ACQUIRE_IMAGE:
+
+    IMG
+
+WAIT_FOR_ADC:
+
+    LDR     r0, SR      ; Check if the ADC conversion is complete
+    AND     r0, MASK_AF
+    BNZ     WAIT_FOR_ADC
+
+CONVERT_TO_BINARY:
+    
+    LDR     r0, START_OF_X  ; Start of image
+    LDR     r1, r0
+    ADD     r1, NUM_PIXELS  ; End of image
+
+CONVERT_TO_BINARY_LOOP:
+
+    LDR     r2, [r0]    ; Convert gray to binary code
+    GTB     r2
+    STR     r2, [r0]
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     CONVERT_TO_BINARY_LOOP
+ 
+    LDR     r0, START_OF_X
+    B       VERTICAL_EDGE_DETECT
+
+;-------------------------------------------------------------------------------
+; Detect vertical edges
+;-------------------------------------------------------------------------------
+
+VERTICAL_EDGE_DETECT:
+
+    LDR     addr, START_OF_X
+
+VERTICAL_EDGE_DETECT_LOOP:
+
+    LDR     tmp, addr
+    AND     tmp, COL_MASK
+    BZ      VERTICAL_PIXEL_ON_W_EDGE
+    B       VERTICAL_PIXEL_IN_INTERIOR
+
+VERTICAL_PIXEL_ON_W_EDGE:
+
+    ADD     addr, 7                     ; Jump to E pixel in this row and send to E NP
+    LDR     pxl_nw, [addr]
+    LDR     pxl_nw, W
+    SUB     addr, 7                     ; Return to current pixel
+    LDR     pxl_c, [addr]
+    B       VERTICAL_CHECK_IF_RISING_EDGE
+ 
+VERTICAL_PIXEL_IN_INTERIOR:
+
+    LDR     pxl_c, [addr]               ; Assume pxl_nw loaded from last iteration
+    B       VERTICAL_CHECK_IF_RISING_EDGE
+                        
+VERTICAL_CHECK_IF_RISING_EDGE:
+
+    CMP     pxl_c, pxl_nw               ; Check if value increases from W to C
+    ZLO         
+        LDR     tmp, pxl_c
+        SUB     tmp, pxl_nw             ; delta = C - W
+        CMP     tmp, EDGE_THRESHOLD
+        ZLO
+            ADD     addr, START_OF_Z    ; Set corresponding Z RAM pixel white.
+            LDR     tmp, FFh
+            STR     tmp, [addr]
+            SUB     addr, START_OF_Z    ; Return to the current pixel.
+        WAK
+    WAK
+ 
+VERTICAL_MUST_BE_A_FALLING_EDGE:
+
+    CMP     pxl_c, pxl_nw               ; Check if value decreases from W to C
+    ZHS         
+        LDR     tmp, pxl_nw
+        SUB     tmp, pxl_c              ; delta = W - C
+        CMP     tmp, EDGE_THRESHOLD
+        ZLO
+            ADD     addr, START_OF_Z    ; Set corresponding Z RAM pixel white.
+            LDR     tmp, FFh
+            STR     tmp, [addr]
+            SUB     addr, START_OF_Z    ; Return to the current pixel.
+        WAK
+    WAK
+ 
+VERTICAL_EDGE_DETECT_LOOP_END:
+
+    LDR     pxl_nw, pxl_c               ; Move data for use in next cycle
+    ADD     addr, 1                     ; Move to next pixel
+    CMP     addr, NUM_PIXELS
+    BLO     VERTICAL_EDGE_DETECT_LOOP
+
+;-------------------------------------------------------------------------------
+; Detect horizontal edges 
+;-------------------------------------------------------------------------------
+     
+HORIZONTAL_EDGE_DETECT:
+
+    LDR     addr, START_OF_X
+
+HORIZONTAL_EDGE_DETECT_LOOP:
+
+    LDR     tmp, addr
+    AND     tmp, ROW_MASK
+    BZ      HORIZONTAL_PIXEL_ON_N_EDGE
+    B       HORIZONTAL_PIXEL_IN_INTERIOR
+
+HORIZONTAL_PIXEL_ON_N_EDGE:
+
+    ADD     addr, 56                    ; Jump to S pixel in this col and send to S NP
+    LDR     pxl_nw, [addr]
+    LDR     pxl_nw, N
+    SUB     addr, 56                    ; Return to current pixel
+    LDR     pxl_c, [addr]
+    B       HORIZONTAL_CHECK_IF_RISING_EDGE
+ 
+HORIZONTAL_PIXEL_IN_INTERIOR:
+
+    LDR     pxl_c, [addr]               
+    SUB     addr, 8                     ; Move up a row and load the N pixel
+    LDR     pxl_nw, [addr]
+    ADD     addr, 8
+    B       HORIZONTAL_CHECK_IF_RISING_EDGE
+                        
+HORIZONTAL_CHECK_IF_RISING_EDGE:
+
+    CMP     pxl_c, pxl_nw               ; Check if value increases from N to C
+    ZLO         
+        LDR     tmp, pxl_c
+        SUB     tmp, pxl_nw             ; delta = C - N
+        CMP     tmp, EDGE_THRESHOLD
+        ZLO
+            ADD     addr, START_OF_Z    ; Set corresponding Z RAM pixel white.
+            LDR     tmp, FFh
+            STR     tmp, [addr]
+            SUB     addr, START_OF_Z    ; Return to the current pixel.
+        WAK
+    WAK
+ 
+HORIZONTAL_MUST_BE_A_FALLING_EDGE:
+
+    CMP     pxl_c, pxl_nw                ; Check if value decreases from N to C
+    ZHS         
+        LDR     tmp, pxl_nw
+        SUB     tmp, pxl_c              ; delta = C - N
+        CMP     tmp, EDGE_THRESHOLD
+        ZLO
+            ADD     addr, START_OF_Z    ; Set corresponding Z RAM pixel white.
+            LDR     tmp, FFh
+            STR     tmp, [addr]
+            SUB     addr, START_OF_Z    ; Return to the current pixel.
+        WAK
+    WAK
+ 
+HORIZONTAL_EDGE_DETECT_LOOP_END:
+
+    LDR     pxl_nw, pxl_c                ; Move data for use in next cycle
+    ADD     addr, 1                     ; Move to next pixel
+    CMP     addr, NUM_PIXELS
+    BLO     HORIZONTAL_EDGE_DETECT_LOOP
+
+;PERIMETER_ZERO_INIT:
+;	LDR		r1, 0
+;	
+;PERIMETER_ZERO:
+;
+;	LDR 	r0, rcr
+;	CMP		r0, r1
+;	ZNE
+;		PERIMETER_ZERO_MEMORY_INIT:
+;		
+;			LDR		r2, START_OF_Z
+;		
+;		PERIMETER_ZERO_MEMORY:
+;		
+;			LDR		r0, 0
+;			STR		r0, [r2]
+;			ADD		r2, 8
+;			CMP		r2, NUM_PIXELS
+;			BLO		PERIMETER_ZERO_MEMORY
+;	WAK
+;	ADD		r1, 10h
+;	CMP		r1, 80h
+;	BLO		PERIMETER_ZERO
+
+OUTPUT_EDGE_MAP:
+
+    LDR     addr, START_OF_Z            ; Output the edge map in Z
+    BL      Output_Data_Block
+    B       START                       ; Infinite loop
+
+END:
+
+    B       END
+
+
+;-------------------------------------------------------------------------------
+; Output_Data_Block
+;
+; Description:
+;
+;   The output function, which dumps 64 bytes of data out through the column
+;   data bus.  This can be called with different starting addresses to determine
+;   whether X, Y, Z or some other block is output.
+;
+; Inputs:
+;
+;   r0          The address to begin outputing.  The last byte will be output
+;               from address r0+63.
+;
+; Outputs:
+;
+;   -           64 bytes for each NP on column data bus.
+;
+; Registers Modified:
+;
+;   r0, r1
+;-------------------------------------------------------------------------------
+
+Output_Data_Block:
+
+    LDR     r1, r0          ; Calculate the final address.
+    ADD     r1, 64      
+
+OUTPUT_DATA_BLOCK_LOOP:
+
+    OUT     [r0], 0          ; Row 0
+    OUT     [r0], 1          ; Row 1
+    OUT     [r0], 2          ; Row 2
+    OUT     [r0], 3          ; Row 3
+    OUT     [r0], 4          ; Row 4
+    OUT     [r0], 5          ; Row 5
+    OUT     [r0], 6          ; Row 6
+    OUT     [r0], 7          ; Row 7
+    
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+    BX 

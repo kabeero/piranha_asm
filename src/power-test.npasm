@@ -1,0 +1,126 @@
+;-------------------------------------------------------------------------------
+; power-test.npasm
+;-------------------------------------------------------------------------------
+
+; program to test the power dissipation of PIRANHA
+; turn off NPs at various levels
+
+#define MASK_AF        01000000b   ; Mask for ADC active flag
+#define BZ             BEQ         ; Alias branch if zero to branch if equal
+#define BNZ            BNE         ; Alias branch if not zero to branch if not equal
+#define START_OF_X     00000000b   ; Start address of X RAM
+#define START_OF_Y     01000000b   ; Start address of X RAM
+#define START_OF_Z     10000000b   ; Start address of X RAM
+#define SLEEPY_NPS     20          ; # of NPs to put to sleep
+
+START:
+
+    NOP                     ; Add dummy cycle since imaging immediately on 
+                            ;   reset is awkward for simulation purposes.
+
+CLEAN_SLATE_INIT:
+ 
+    LDR     r0, START_OF_X  ; Overwrite x ram with constant (note this is in gray code)
+    LDR     r2, 255      
+    LDR     r1, r0          ; Calculate the final address
+    ADD     r1, 64      
+
+CLEAN_SLATE_LOOP:
+
+    STR     r2, [r0]
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     CLEAN_SLATE_LOOP
+ 
+ACQUIRE_RESET_IMAGE:
+
+    IMG                     ; Acquire a new image from the ADCs with t_int = 0
+
+WAIT_FOR_RESET_ADC:
+
+    LDR     r0, SR                ; Load the status register
+    AND     r0, MASK_AF           ; Check if the ADC is active
+    BNZ     WAIT_FOR_RESET_ADC    ; Loop while the ADC is converting
+
+MOVE_TO_Y_INIT:
+
+    LDR     r1, START_OF_X
+    LDR     r2, START_OF_Y
+
+MOVE_TO_Y:
+
+    LDR     r0, [r1]
+    GTB     r0
+    STR     r0, [r2]
+    ADD     r1, 1
+    ADD     r2, 1
+    CMP     r1, 64
+    BNE     MOVE_TO_Y
+
+SLEEP_NPS:
+
+    LDR     r0, RCR
+    CMP     r0, 79
+    ZLT
+
+	ACQUIRE_IMAGE:
+	
+	    IMG                     ; Acquire a new image from the ADCs with real t_int
+	
+	WAIT_FOR_ADC:
+	
+	    ; At this point, the FSM for the ADC is running.  Read the status register
+	    ; to check if the conversion is finished. (Note: very inefficient)
+	
+	    LDR     r0, SR          ; Load the status register
+	    AND     r0, MASK_AF     ; Check if the ADC is active
+	    BNZ     WAIT_FOR_ADC    ; Loop while the ADC is converting
+
+	WAK
+
+DIFFERENCE_INIT:
+
+    LDR     r1, START_OF_X
+    LDR     r2, START_OF_Y
+    LDR     r3, START_OF_Z
+
+DIFFERENCE:
+
+    LDR     r0, [r1]
+    GTB     r0
+    SUB     r0, [r2]
+    STR     r0, [r3]
+    ADD     r1, 1
+    ADD     r2, 1
+    ADD     r3, 1
+    CMP     r1, 64
+    BNE     DIFFERENCE
+
+OUTPUT_DATA_BLOCK_INIT:
+
+    ; Begin outputting all of the data in z, which is the newly captured image.
+
+    LDR     r0, START_OF_Z  ; Output z ram
+    LDR     r1, r0          ; Calculate the final address
+    ADD     r1, 64      
+
+OUTPUT_DATA_BLOCK_LOOP:
+
+    LDR     r2, [r0]        ; Convert gray to binary code
+    STR     r2, [r0]
+    OUT     [r0], 0         ; Row 0
+    OUT     [r0], 1         ; Row 1
+    OUT     [r0], 2         ; Row 2
+    OUT     [r0], 3         ; Row 3
+    OUT     [r0], 4         ; Row 4
+    OUT     [r0], 5         ; Row 5
+    OUT     [r0], 6         ; Row 6
+    OUT     [r0], 7         ; Row 7
+    
+    ADD     r0, 1
+    CMP     r0, r1
+    BNE     OUTPUT_DATA_BLOCK_LOOP
+
+END:
+
+    B       START

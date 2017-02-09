@@ -1,0 +1,53 @@
+;-------------------------------------------------------------------------------
+; power-test-basic.npasm
+;-------------------------------------------------------------------------------
+
+; Tests the sleep mode power consumption of the NP array in PIRANHA.  Disables
+; exactly the number of NPs specified by SLEEPY_NPS and the remaining ones run a
+; simple code loop infinitely to allow for easy power measurement.  The only
+; tricky part is calculating whether or not a given NP should be put to sleep
+; based on its row-column register (RCR).
+;
+; RCR Format : RRRRCCCC where RRRR and CCCC are between 0-15
+; Examples:    NP(0,0) = 0x00 NP(0,1) = 0x01 ... NP(0,15) = 0x0F
+;              NP(1,0) = 0x10 NP(1,1) = 0x11 ... NP(1,15) = 0x1F
+;
+; Since PIRANHA has less than the maximum 16x16 NP array, the RCR does not
+; increase uniformly moving across the array (it jumps at each new row).
+
+#define MASK_AF        01000000b   ; Mask for ADC active flag
+#define BZ             BEQ         ; Alias branch if zero to branch if equal
+#define BNZ            BNE         ; Alias branch if not zero to branch if not equal
+#define START_OF_X     00000000b   ; Start address of X RAM
+#define START_OF_Y     01000000b   ; Start address of X RAM
+#define START_OF_Z     10000000b   ; Start address of X RAM
+#define NUM_NP_COL     10          ; Number of columns of NPs in the array
+#define NUM_NP_ROW     8           ; Number of rows of NPs in the array
+
+#define SHEEP          r3          ; Register to hold sheep count
+#define SLEEPY_NPS     79          ; # of NPs to put to sleep, 0-80
+
+START:
+
+    NOP                     ; Add dummy cycle since imaging immediately on 
+                            ;   reset is awkward for simulation purposes.
+
+GOODNIGHT_NPS:
+
+    ; Is this NP's RCR below the cutoff RCR threshold?  First find the number
+    ; of full rows that need disabled (using integer division) then the number of
+    ; additional NPs in the final partial row (using modulo) to reach the desired
+    ; target.  Be sure to use unsigned comparisons.
+
+    LDR     r0, RCR
+    CMP     r0, {((SLEEPY_NPS / NUM_NP_COL) << 4) + (SLEEPY_NPS % NUM_NP_COL)}
+    ZLT
+
+SWEET_DREAMS:
+
+        ; Those NPs whom can't get to sleep count sheep.  We don't need to init
+        ; this variable since we don't care what value it starts at.
+        ADD     SHEEP, 1
+        B       SWEET_DREAMS
+
+; No WAK since this infinite loops

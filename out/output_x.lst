@@ -1,0 +1,43 @@
+ 0 000h |                         | ;-------------------------------------------------------------------------------
+ 0 000h |                         | ; buffer.npasm
+ 0 000h |                         | ;-------------------------------------------------------------------------------
+ 0 000h |                         |   
+ 0 000h |                         | ; Architecture constants
+ 0 000h |                         | 
+ 0 000h |                         | #define START_OF_X          00000000b   ; Starting address of X RAM.
+ 0 000h |                         | #define START_OF_Y          01000000b   ; Starting address of Y RAM.
+ 0 000h |                         | #define START_OF_Z          10000000b   ; Starting address of X RAM.
+ 0 000h |                         | #define START_OF_V          11000000b   ; Starting address of V RAM.
+ 0 000h |                         | #define NUM_PIXELS          64          ; The number of pixels in one NP.
+ 0 000h |                         | 
+ 0 000h |                         | ; Variables
+ 0 000h |                         | 
+ 0 000h |                         | #define addr                r0          ; The address to write to.
+ 0 000h |                         | #define final_addr          r1          ; The last address to write to.
+ 0 000h |                         |  
+ 0 000h |                         | START:
+ 0 000h |                         | 
+ 0 000h |                         | LOAD_PATTERN_INIT:
+ 0 000h |                         |  
+ 0 000h | 4100h 0100000100000000b |     LDR     addr, START_OF_X        ; Output the X RAM.
+ 1 001h | 42D0h 0100001011010000b |     LDR     final_addr, addr        ; Calculate the final address.
+ 2 002h | 0340h 0000001101000000b |     ADD     final_addr, NUM_PIXELS
+ 3 003h |                         |                 
+ 3 003h |                         | OUTPUT_DATA_BLOCK_LOOP:
+ 3 003h |                         | 
+ 3 003h | A0F0h 1010000011110000b |     OUT     [addr], 0               ; Row 0
+ 4 004h | A2F0h 1010001011110000b |     OUT     [addr], 1               ; Row 1
+ 5 005h | A4F0h 1010010011110000b |     OUT     [addr], 2               ; Row 2
+ 6 006h | A6F0h 1010011011110000b |     OUT     [addr], 3               ; Row 3
+ 7 007h | A8F0h 1010100011110000b |     OUT     [addr], 4               ; Row 4
+ 8 008h | AAF0h 1010101011110000b |     OUT     [addr], 5               ; Row 5
+ 9 009h | ACF0h 1010110011110000b |     OUT     [addr], 6               ; Row 6
+10 00Ah | AEF0h 1010111011110000b |     OUT     [addr], 7               ; Row 7
+11 00Bh |                         |     
+11 00Bh | 0101h 0000000100000001b |     ADD     addr, 1                 ; Check if done outputting the RAM.
+12 00Ch | 38D1h 0011100011010001b |     CMP     addr, final_addr
+13 00Dh | C031h 1100000000110001b |     BNE     OUTPUT_DATA_BLOCK_LOOP
+14 00Eh |                         | 
+14 00Eh |                         | END:
+14 00Eh |                         | 
+14 00Eh | 8300h 1000001100000000b |     RST

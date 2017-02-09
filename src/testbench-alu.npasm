@@ -1,0 +1,158 @@
+; Define new instruction labels to make the code intuitive to read.
+
+#define ROW_MASK            11110000b   ; The row bits.
+#define COL_MASK            00001111b   ; The column bits.
+
+#define START_OF_X          00000000b   ; Starting address of X RAM.
+#define START_OF_Y          01000000b   ; Starting address of Y RAM.
+#define START_OF_Z          10000000b   ; Starting address of X RAM.
+#define START_OF_V          11000000b   ; Starting address of V RAM.
+ 
+#define TRUE                 1          ; True pattern
+#define FALSE                0          ; False pattern
+#define NULL                -1          ; Null pattern
+
+#define NUM_PIXELS          64          ; The number of pixels in the NP.
+
+START:
+                            ;    A      B      R | O N C Z
+
+ADDITION:
+ 
+    LDR     r0, 0           ;    0 +    0 =    0 | 0 0 0 1
+    ADD     r0, 0
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+             
+    LDR     r0, 0           ;    0 +    1 =    1 | 0 0 0 0
+    ADD     r0, 1
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 0           ;    0 +  127 =  127 | 0 0 0 0
+    ADD     r0, 127
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 0           ;    0 +  128 =  128 | 0 1 0 0
+    ADD     r0, 128
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 0           ;    0 +  255 =  255 | 0 1 0 0
+    ADD     r0, 255
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 1           ;    1 +  255 =    0 | 0 0 1 1
+    ADD     r0, 255
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 1           ;    1 +  127 =  128 | 1 1 0 0
+    ADD     r0, 127
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 128         ;  128 +  128 =    0 | 1 0 1 1
+    ADD     r0, 128
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 128         ;  128 +  255 =  127 | 1 0 1 0
+    ADD     r0, 255
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 255         ;  255 +  255 =  254 | 0 1 1 0
+    ADD     r0, 255
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+SUBTRACTION:
+    
+    LDR     r0, 0           ;    0 -    0 =    0 | 0 0 1 1
+    SUB     r0, 0
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+     
+    LDR     r0, 0           ;    0 -    1 =   -1 | 0 1 0 0
+    SUB     r0, 1
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+               
+    LDR     r0, 1           ;    1 -    0 =    1 | 0 0 1 0
+    SUB     r0, 0
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+               
+    LDR     r0, 1           ;    1 -    1 =    0 | 0 0 1 1
+    SUB     r0, 1
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+               
+    LDR     r0, 128         ;  128 -  128 =    0 | 0 0 1 1
+    SUB     r0, 128
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 255         ;  255 -  255 =    0 | 0 0 1 1
+    SUB     r0, 255
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+               
+    LDR     r0, 0           ;    0 -  127 = -127 | 0 1 0 0
+    SUB     r0, 127
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 0           ;    0 -  128 = -128 | 1 1 0 0
+    SUB     r0, 128
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 0           ;    0 -  255 =    1 | 0 0 0 0
+    SUB     r0, 255
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 1           ;    1 -  127 = -126 | 0 1 0 0
+    SUB     r0, 127
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 128         ;  128 -  255 = -127 | 0 1 0 0
+    SUB     r0, 255
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+
+    LDR     r0, 255         ;  255 -  128 =  127 | 0 0 1 0
+    SUB     r0, 128
+    LDR     r1, SR
+    OUT     r0, 7
+    OUT     r1, 7
+    
+END:
+
+    RST
